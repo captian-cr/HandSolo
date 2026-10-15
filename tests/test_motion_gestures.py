@@ -169,19 +169,36 @@ def test_dropping_the_pose_before_drawing_only_cancels() -> None:
 
 
 # ---------------- 完整链路 ----------------
-def _run_until_candidate(engine: MotionGestureEngine, start: int = 1_000_000_000):
-    """双指悬停 → 画 W → 收笔，返回候选阶段的 outcome 与收笔时间。"""
+def _run_until_candidate(
+    engine: MotionGestureEngine,
+    start: int = 1_000_000_000,
+    clock=None,
+):
+    """双指悬停 → 画 W → 收笔，返回候选阶段的 outcome 与收笔时间。
+
+    ``clock`` 为 ArrivalClock 时，每次 process 前把到达墙钟拨到当前采集时刻戳，
+    使 _last_hand_ns / _candidate_since_ns 与 tick 传入的时间戳同源，恢复"到达=
+    采集"的测试语义（即取包延迟为 0）。
+    """
 
     tip = (0.50, 0.45)
+    if clock is not None:
+        clock.set_ns(start)
     engine.process(two_finger_observation(tip, start))
+    if clock is not None:
+        clock.set_ns(start + 220_000_000)
     assert engine.process(two_finger_observation(tip, start + 220_000_000)).state is MotionState.ARMED
 
     now = start + 240_000_000
     for x, y in _densify(DESIGN_W):
         now += 16_000_000
+        if clock is not None:
+            clock.set_ns(now)
         engine.process(two_finger_observation((x, y), now))
 
     now += 16_000_000
+    if clock is not None:
+        clock.set_ns(now)
     return engine.process(pen_up_observation(now)), now
 
 
@@ -205,9 +222,9 @@ def test_drawn_w_becomes_candidate_and_requires_pinch_to_execute() -> None:
     assert confirmed.action.name == "W"
 
 
-def test_candidate_is_dropped_when_confirmation_times_out() -> None:
+def test_candidate_is_dropped_when_confirmation_times_out(arrival_clock) -> None:
     engine = MotionGestureEngine(_config(motion_confirm_timeout_ms=1000))
-    _, now = _run_until_candidate(engine)
+    _, now = _run_until_candidate(engine, clock=arrival_clock)
 
     assert engine.tick(now + 500_000_000).state is MotionState.CANDIDATE
 
@@ -218,12 +235,15 @@ def test_candidate_is_dropped_when_confirmation_times_out() -> None:
     assert timed_out.action is None
 
 
-def test_losing_hand_during_drawing_discards_the_trajectory() -> None:
+def test_losing_hand_during_drawing_discards_the_trajectory(arrival_clock) -> None:
     engine = MotionGestureEngine(_config(motion_hand_lost_ms=200))
     start = 1_000_000_000
     tip = (0.50, 0.45)
+    arrival_clock.set_ns(start)
     engine.process(two_finger_observation(tip, start))
+    arrival_clock.set_ns(start + 220_000_000)
     engine.process(two_finger_observation(tip, start + 220_000_000))
+    arrival_clock.set_ns(start + 240_000_000)
     engine.process(two_finger_observation((0.60, 0.50), start + 240_000_000))
 
     assert engine.state is MotionState.DRAWING
@@ -339,3 +359,127 @@ def test_leaving_motion_mode_resets_cursor_state() -> None:
     # 重置后第一次更新必须原样透传，否则恢复控制的瞬间光标会跳。
     assert pointer_filter.update(0.30, 0.30, now + 99_000_000) == (0.30, 0.30)
     assert worker.motion.sample(now + 120_000_000) is None
+
+
+# ---------------- 时间域统一（笔2）：真失联/超时回归 ----------------
+# 与笔1（gestures.last_hand_ns）同模式：_last_hand_ns / _candidate_since_ns
+# 改用到达墙钟，tick() 的 elapsed 不再含"取包延迟"段。以下用例不许把真失联/真超时
+# 修没，也不许让取包延迟假性触发。
+
+def _arm(engine: MotionGestureEngine, clock, start: int) -> int:
+    """双指悬停 motion_arm_hold_ms 进入 ARMED，返回最后一帧到达时刻。"""
+
+    clock.set_ns(start)
+    engine.process(two_finger_observation((0.50, 0.45), start))
+    arm_ns = start + (engine.config.motion_arm_hold_ms + 20) * 1_000_000
+    clock.set_ns(arm_ns)
+    outcome = engine.process(two_finger_observation((0.50, 0.45), arm_ns))
+    assert outcome.state is MotionState.ARMED
+    return arm_ns
+
+
+def test_hand_lost_not_triggered_while_hand_stays_in_view(arrival_clock) -> None:
+    """手持续在画面：到达间隔远小于 motion_hand_lost_ms，不得作废轨迹。"""
+
+    config = _config(motion_hand_lost_ms=200)
+    engine = MotionGestureEngine(config)
+    last = _arm(engine, arrival_clock, 1_000_000_000)
+
+    # 继续以 100ms 间隔交付观测，手一直在线。
+    for step in range(1, 4):
+        stamp = last + step * 100_000_000
+        arrival_clock.set_ns(stamp)
+        engine.process(two_finger_observation((0.50, 0.45), stamp))
+
+    # 最后一帧到达后只隔一个帧间隔就 tick：手仍在交付路径上。
+    outcome = engine.tick(last + 400_000_000)
+
+    assert outcome.active
+    assert "作废" not in outcome.message
+
+
+def test_hand_lost_triggered_when_hand_leaves_view(arrival_clock) -> None:
+    """真失联必须仍会触发：出画后到达间隔 ≥ motion_hand_lost_ms。
+
+    时间域统一不能把真出画也一起修没。
+    """
+
+    config = _config(motion_hand_lost_ms=200)
+    engine = MotionGestureEngine(config)
+    last = _arm(engine, arrival_clock, 1_000_000_000)
+
+    outcome = engine.tick(last + (config.motion_hand_lost_ms + 50) * 1_000_000)
+
+    assert outcome.state is MotionState.IDLE
+    assert "丢失" in outcome.message
+
+
+def test_hand_lost_not_triggered_by_packet_delivery_delay(arrival_clock) -> None:
+    """本次 bug 直接回归（_last_hand_ns）：取包延迟不得被算成手部失联。
+
+    采集时刻戳落后到达墙钟 200ms，修复前 elapsed = 墙钟 now - 采集时刻 ≈ 200ms，
+    刚好越过 motion_hand_lost_ms 触发假性作废。
+    """
+
+    config = _config(motion_hand_lost_ms=200, motion_arm_hold_ms=100)
+    engine = MotionGestureEngine(config)
+    capture_ns = 1_000_000_000
+    arrival_ns = capture_ns + 200_000_000
+
+    # 进入 ARMED：采集时刻落后到达 200ms。
+    arrival_clock.set_ns(arrival_ns)
+    engine.process(two_finger_observation((0.50, 0.45), capture_ns))
+    arm_capture = capture_ns + 120_000_000
+    arm_arrival = arm_capture + 200_000_000
+    arrival_clock.set_ns(arm_arrival)
+    assert engine.process(
+        two_finger_observation((0.50, 0.45), arm_capture),
+    ).state is MotionState.ARMED
+
+    # 同一到达时刻 tick：手仍在交付路径上，取包延迟不构成失联。
+    outcome = engine.tick(arm_arrival)
+
+    assert outcome.state is MotionState.ARMED
+    assert "丢失" not in outcome.message
+
+
+def test_confirm_timeout_not_triggered_by_packet_delivery_delay(arrival_clock) -> None:
+    """本次 bug 直接回归（_candidate_since_ns）：取包延迟不得被算成确认超时。
+
+    收笔形成候选时采集时刻落后到达墙钟 600ms。修复前 elapsed = 墙钟 now - 采集时刻
+    = 600ms + 500ms = 1100ms > motion_confirm_timeout_ms，候选被误丢弃；修复后
+    _candidate_since_ns 记到达墙钟，elapsed = 500ms，候选保留。
+    """
+
+    config = _config(motion_confirm_timeout_ms=1000)
+    engine = MotionGestureEngine(config)
+    start = 1_000_000_000
+    tip = (0.50, 0.45)
+    delay_ns = 600_000_000
+
+    # 双指悬停进入 ARMED（采集与到达对齐）。
+    arrival_clock.set_ns(start)
+    engine.process(two_finger_observation(tip, start))
+    arm_ns = start + 220_000_000
+    arrival_clock.set_ns(arm_ns)
+    engine.process(two_finger_observation(tip, arm_ns))
+
+    # 画 W（采集与到达对齐）。
+    now = arm_ns + 20_000_000
+    for x, y in _densify(DESIGN_W):
+        now += 16_000_000
+        arrival_clock.set_ns(now)
+        engine.process(two_finger_observation((x, y), now))
+
+    # 收笔形成候选：采集时刻落后到达墙钟 delay_ns。
+    capture_penup = now + 16_000_000
+    arrival_penup = capture_penup + delay_ns
+    arrival_clock.set_ns(arrival_penup)
+    candidate = engine.process(pen_up_observation(capture_penup))
+    assert candidate.state is MotionState.CANDIDATE
+
+    # 到达时刻 + 500ms tick：取包延迟不应计入确认计时。
+    outcome = engine.tick(arrival_penup + 500_000_000)
+
+    assert outcome.state is MotionState.CANDIDATE
+    assert "丢弃" not in outcome.message

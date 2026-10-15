@@ -106,9 +106,14 @@ class MotionGestureEngine:
         self._candidate_since_ns: int | None = None
         self._last_hand_ns: int | None = None
         # 诊断用：最近一次观测被 process() 消费的墙钟时刻（到达时刻戳）。
-        # 与 _last_hand_ns（采集时刻戳）配对，用于把 tick() 的 elapsed 拆两段。
-        # 仅在 VERBOSE_GATE 下写入。
+        # 笔2 之后 _last_hand_ns 也改用到达墙钟，因此本字段与 _last_hand_ns 恒等
+        # （dwell 段恒为 0），tick() 的 elapsed 不再含"取包延迟"段；取包延迟改由
+        # pipeline 的 [采样] latency_ms 观察。字段保留以便将来"到达 vs 采集"差
+        # 诊断复用，仅在 VERBOSE_GATE 下写入。
         self._last_hand_arrival_ns: int | None = None
+        # 本帧到达墙钟，process() 入口处打一次，供 _finish_drawing 设置
+        # _candidate_since_ns 时复用，保证与 _last_hand_ns 同源。
+        self._arrival_ns: int = 0
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -148,6 +153,11 @@ class MotionGestureEngine:
         observation: HandObservation,
         timestamp_ns: int | None = None,
     ) -> MotionOutcome:
+        # 到达墙钟：本帧交付到控制线程的时刻。tick() 的 hand_lost / confirm_timeout
+        # 判定用的是墙钟，_last_hand_ns 与 _candidate_since_ns 必须记在同一时钟上；
+        # 若沿用 now（采集时刻戳），elapsed = 墙钟 now - 采集时刻 会把"取包延迟 +
+        # 帧间隔"算成经过时间，逼近 motion_hand_lost_ms 时假性作废轨迹。
+        self._arrival_ns = monotonic_ns()
         now = timestamp_ns or observation.timestamp_ns
         if not self.config.motion_gestures_enabled:
             if self.active:
@@ -162,9 +172,9 @@ class MotionGestureEngine:
                 return self.reset("手部数据中断，已作废本次轨迹")
             return self.tick(now)
 
-        self._last_hand_ns = now
+        self._last_hand_ns = self._arrival_ns
         if VERBOSE_GATE:
-            self._last_hand_arrival_ns = monotonic_ns()
+            self._last_hand_arrival_ns = self._arrival_ns
         width = _palm_width(points)
         pinch_ratio = _distance_2d(points[4], points[8]) / width
         tip = (float(points[8].x), float(points[8].y))
@@ -293,7 +303,7 @@ class MotionGestureEngine:
 
         self.candidates = tuple(candidates)
         self.pending = best.name
-        self._candidate_since_ns = now
+        self._candidate_since_ns = self._arrival_ns
         self.state = MotionState.CANDIDATE
         return self._candidate_outcome("捏合确认执行")
 

@@ -198,8 +198,12 @@ def arrival_clock(monkeypatch) -> ArrivalClock:
     """
 
     from handmouse import gestures as gestures_module
+    from handmouse import motion_gestures as motion_module
 
     clock = ArrivalClock()
+    # gestures 与 motion 在同一控制线程内消费观测，到达墙钟必须同源，否则两个
+    # 状态机的 elapsed 会跨域。这里用同一个 ArrivalClock 实例 patch 两个模块。
     monkeypatch.setattr(gestures_module, "monotonic_ns", clock)
+    monkeypatch.setattr(motion_module, "monotonic_ns", clock)
     return clock
 
