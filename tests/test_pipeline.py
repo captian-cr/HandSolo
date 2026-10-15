@@ -45,7 +45,7 @@ def test_tick_state_transition_is_reported() -> None:
 
     on_state 既是 [状态] 日志的唯一出口，也是快照手势的唯一写入口。r2 盖镜头
     后 58 秒无手，engine 内部早已转 lost，但日志与快照始终停在 left_pinch
-    ——硬线 1/6 因此根本测不出来。
+    ——硬线 H1 因此根本测不出来。
     """
 
     reported: list[tuple[GestureType, bool]] = []

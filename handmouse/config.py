@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 
@@ -29,26 +29,6 @@ def _base_dir() -> Path:
 
 PROJECT_ROOT = _base_dir()
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
-
-# 默认动作绑定：画完字母/形状后捏合确认即执行。
-# 想改成自己的习惯，直接编辑 config.json 的 motion_bindings 即可。
-DEFAULT_MOTION_BINDINGS: dict[str, dict[str, str]] = {
-    "W": {"kind": "launch", "target": "notepad"},
-    "C": {"kind": "launch", "target": "calc"},
-    "E": {"kind": "launch", "target": "explorer"},
-    "X": {"kind": "hotkey", "target": "ctrl+w"},
-    "CIRCLE": {"kind": "hotkey", "target": "win+d"},
-    "LINE": {"kind": "hotkey", "target": "alt+tab"},
-}
-
-# LAUNCH 白名单：别名 → 可执行文件（写全路径或 PATH 内名字均可）。
-# 不在白名单里的目标一律拒绝执行。
-DEFAULT_LAUNCH_WHITELIST: dict[str, str] = {
-    "notepad": "notepad.exe",
-    "calc": "calc.exe",
-    "explorer": "explorer.exe",
-    "settings": "ms-settings:",
-}
 
 
 @dataclass(slots=True)
@@ -96,16 +76,9 @@ class AppConfig:
     # 全局闸门：未进入控制态时，下游手势（捏合/翻页/拖拽）一律不执行，从根上
     # 挡住"脸被误判成手"产生的幻影动作。默认关，与 virtual_desk_experimental
     # 一样先在一轮引导基线里验证，再决定是否转正。
-    #
-    # 已知 gap（勿误读为"门是全局的"）：本闸门当前只覆盖 GestureEngine，
-    # DTW 轨迹引擎（motion_gestures）未纳入——它在 pipeline 里先于 GestureEngine
-    # 运行，输入不受闸门约束。待 r3 数据确认 DTW 在"无意图段"是否出现非 idle
-    # （r2 为 0 次）后再决定是否补纳入；r3 复盘时 DTW 的 [轨迹] 单独统计，
-    # 它出非 idle 记"DTW 未纳入门"，不记"门漏了"。
     entry_gate_enabled: bool = False
-    # 进入姿势（掌心朝镜 + 五指张开）需连续保持的时间；与双指悬停同量级，
-    # 不引入新的时间常数。退出复用既有常数：握拳退出沿用 fist_hold_ms，
-    # 手出画退出沿用 hand_lost_ms。
+    # 进入姿势（掌心朝镜 + 五指张开）需连续保持的时间。退出复用既有常数：
+    # 握拳退出沿用 fist_hold_ms，手出画退出沿用 hand_lost_ms。
     entry_hold_ms: int = 300
 
     # ---- 局部续跟踪 ----
@@ -122,31 +95,6 @@ class AppConfig:
     # 实验开关：multi_monitor=False 时也走 MOUSEEVENTF_VIRTUALDESK，
     # 用于在多屏机器上先验证官方推荐路径，再决定是否把 multi_monitor 打开。
     virtual_desk_experimental: bool = False
-
-    # ---- 轨迹手势（DTW，第二阶段新增）----
-    # 流程：双指(食指+中指)悬停 motion_arm_hold_ms → 绘制 → 收指出候选 → 捏合确认执行。
-    motion_gestures_enabled: bool = True
-    motion_arm_hold_ms: int = 250
-    # 悬停期间允许的指尖漂移（归一化图像坐标）；超过就认为是"在移动光标"
-    # 而不是"准备画画"，重新计时。这条是防误触发的关键。
-    motion_arm_max_drift: float = 0.05
-    motion_min_duration_ms: int = 250
-    motion_min_path_px: float = 60.0
-    motion_template_points: int = 32
-    motion_max_candidates: int = 3
-    motion_accept_distance: float = 0.18
-    motion_confirm_timeout_ms: int = 2500
-    motion_confirm_pinch: float = 0.42
-    motion_hand_lost_ms: int = 200
-
-    # ---- 动作绑定与 LAUNCH 白名单 ----
-    motion_bindings: dict[str, dict[str, str]] = field(
-        default_factory=lambda: dict(DEFAULT_MOTION_BINDINGS),
-    )
-    launch_enabled: bool = True
-    launch_whitelist: dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_LAUNCH_WHITELIST),
-    )
 
     @classmethod
     def from_mapping(cls, raw: dict[str, object]) -> "AppConfig":
@@ -191,50 +139,6 @@ class AppConfig:
         self.cursor_snap_radius_px = max(12, min(80, int(self.cursor_snap_radius_px)))
         if self.handedness not in {"Left", "Right", "Any"}:
             self.handedness = "Right"
-
-        self.motion_arm_hold_ms = max(80, min(1500, int(self.motion_arm_hold_ms)))
-        self.motion_arm_max_drift = max(0.005, min(0.3, float(self.motion_arm_max_drift)))
-        self.motion_min_duration_ms = max(80, min(3000, int(self.motion_min_duration_ms)))
-        self.motion_min_path_px = max(10.0, min(1000.0, float(self.motion_min_path_px)))
-        self.motion_template_points = max(8, min(128, int(self.motion_template_points)))
-        self.motion_max_candidates = max(1, min(6, int(self.motion_max_candidates)))
-        self.motion_accept_distance = max(0.02, min(0.6, float(self.motion_accept_distance)))
-        self.motion_confirm_timeout_ms = max(
-            500,
-            min(10_000, int(self.motion_confirm_timeout_ms)),
-        )
-        self.motion_confirm_pinch = max(0.10, min(0.95, float(self.motion_confirm_pinch)))
-        self.motion_hand_lost_ms = max(100, min(1000, int(self.motion_hand_lost_ms)))
-
-        self.motion_bindings = self._sanitize_bindings(self.motion_bindings)
-        self.launch_whitelist = self._sanitize_whitelist(self.launch_whitelist)
-
-    @staticmethod
-    def _sanitize_bindings(raw: object) -> dict[str, dict[str, str]]:
-        """只保留 ``{kind, target}`` 且 kind 合法的绑定。"""
-
-        if not isinstance(raw, dict):
-            return dict(DEFAULT_MOTION_BINDINGS)
-        cleaned: dict[str, dict[str, str]] = {}
-        for name, spec in raw.items():
-            if not isinstance(spec, dict):
-                continue
-            kind = str(spec.get("kind", "")).strip().lower()
-            target = str(spec.get("target", "")).strip()
-            if kind not in {"launch", "hotkey"} or not target:
-                continue
-            cleaned[str(name).strip().upper()] = {"kind": kind, "target": target}
-        return cleaned
-
-    @staticmethod
-    def _sanitize_whitelist(raw: object) -> dict[str, str]:
-        if not isinstance(raw, dict):
-            return dict(DEFAULT_LAUNCH_WHITELIST)
-        return {
-            str(alias).strip().lower(): str(command).strip()
-            for alias, command in raw.items()
-            if str(command).strip()
-        }
 
 
 class ConfigStore:

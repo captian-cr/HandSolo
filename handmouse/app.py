@@ -29,7 +29,6 @@ from types import SimpleNamespace
 from handmouse import __version__, debug_view, guided
 from handmouse.config import PROJECT_ROOT, AppConfig, ConfigStore
 from handmouse.hotkeys import HotkeyMonitor
-from handmouse.launch import LaunchDispatcher
 from handmouse.mouse import MouseController, NullMouseBackend, Win32MouseBackend
 from handmouse.pipeline import GesturePipeline
 from handmouse.screen_map import ScreenMap, dpi_state, system_dpi_scale
@@ -54,7 +53,6 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="启动即接管鼠标（默认先暂停，按 M 或 Ctrl+Alt+G 才接管）",
     )
-    parser.add_argument("--no-motion", action="store_true", help="关闭轨迹手势（DTW）")
     parser.add_argument("--no-snap", action="store_true", help="关闭控件磁吸（需要 handmouse[uia]）")
     parser.add_argument(
         "--multi-monitor",
@@ -98,11 +96,6 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "隐含 --diagnostic-seconds 30 和 --safe-mode。"
         "需同时设置环境变量 HANDMOUSE_VERBOSE_GATE=1 才能启用诊断日志。",
     )
-    parser.add_argument(
-        "--list-bindings",
-        action="store_true",
-        help="打印当前轨迹动作绑定与 LAUNCH 白名单后退出",
-    )
     return parser.parse_args(argv)
 
 
@@ -117,8 +110,6 @@ def _apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConf
         config.virtual_desk_experimental = True
     if args.no_snap:
         config.cursor_snap_enabled = False
-    if args.no_motion:
-        config.motion_gestures_enabled = False
     config.validate()
     return config
 
@@ -133,15 +124,6 @@ def _pinch_ratio(detection) -> float | None:
         return None
     palm_width = max(hypot(points[5].x - points[17].x, points[5].y - points[17].y), 1e-4)
     return hypot(points[4].x - points[8].x, points[4].y - points[8].y) / palm_width
-
-
-def _print_bindings(config: AppConfig) -> None:
-    print(f"轨迹动作绑定（画完形状后捏合确认才执行）：")
-    for name, spec in config.motion_bindings.items():
-        print(f"  {name:<8} {spec['kind']:<7} → {spec['target']}")
-    print("LAUNCH 白名单（别名 → 命令）：")
-    for alias, command in config.launch_whitelist.items():
-        print(f"  {alias:<10} → {command}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,10 +158,6 @@ def main(argv: list[str] | None = None) -> int:
     store = ConfigStore(args.config)
     config = _apply_cli_overrides(store.load(), args)
 
-    if args.list_bindings:
-        _print_bindings(config)
-        return 0
-
     recorder: guided.FrameRecorder | None = None
     # gate-diag 模式：独立于完整 guided 的 30s 6 段姿势序列
     gate_diag_steps: list[tuple[float, str]] | None = None
@@ -201,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             PROJECT_ROOT / "logs" / f"frames-{time.strftime('%Y%m%d-%H%M%S')}"
         )
         guided.attach_event_trigger(recorder)
-        print(f"[取证] 事件抓帧已开启：[状态]/[注入]/[轨迹]/节拍边界自动存图到 {recorder.directory}")
+        print(f"[取证] 事件抓帧已开启：[状态]/[注入]/节拍边界自动存图到 {recorder.directory}")
 
     screen_map = ScreenMap(
         multi_monitor=config.multi_monitor,
@@ -216,8 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     mouse = MouseController(backend)
-    dispatcher = LaunchDispatcher(config, dry_run=safe_mode)
-    pipeline = GesturePipeline(config, mouse, dispatcher=dispatcher)
+    pipeline = GesturePipeline(config, mouse)
 
     state = SimpleNamespace(
         quit=False,
@@ -237,7 +214,6 @@ def main(argv: list[str] | None = None) -> int:
     if not safe_mode:
         store.save(config)
     print(_environment_line(config, safe_mode))
-    _print_bindings(config)
     print("按键：M 暂停/恢复(接管) | ESC/Q 退出 | Ctrl+Alt+G 接管 | Ctrl+Alt+Esc 急停 | Ctrl+Alt+Q 退出")
 
     if not pipeline.start():
@@ -302,7 +278,6 @@ def main(argv: list[str] | None = None) -> int:
                     frame_packet.frame,
                     snapshot,
                     detection,
-                    pipeline.motion_outcome,
                     screen_map,
                     config,
                     _pinch_ratio(detection),
@@ -357,9 +332,8 @@ def _handle_key(
         pipeline.toggle_paused()
         print(f"[控制] {'已接管' if not pipeline.engine.paused else '已暂停'}")
     elif key in (ord("r"), ord("R")):
-        pipeline.motion_engine.reset()
         pipeline.engine.filter.reset()
-        print("[状态] 已重置滤波器与轨迹手势状态")
+        print("[状态] 已重置滤波器")
     return True
 
 
@@ -392,7 +366,7 @@ def _environment_line(config: AppConfig, safe_mode: bool) -> str:
         f"@{config.camera_fps}fps mirror={config.mirror} "
         f"det={config.min_detection_confidence} pres={config.min_presence_confidence} "
         f"track={config.min_tracking_confidence} "
-        f"motion={config.motion_gestures_enabled} snap={config.cursor_snap_enabled} "
+        f"snap={config.cursor_snap_enabled} "
         f"safe={safe_mode}"
     )
 

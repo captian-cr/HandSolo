@@ -437,7 +437,7 @@ def test_partial_index_moves_but_partial_middle_only_reports_identity() -> None:
 def test_left_pinch_falls_back_to_lost_when_hand_disappears() -> None:
     """r2 实机复现：捏合态下手离画（盖镜头/拔摄像头）后状态冻在 left_pinch。
 
-    硬线 1/6 都要求"手离画能回 lost"，replay baseline-r2 时 58 秒无手却
+    硬线 H1 要求"手离画能回 lost"，replay baseline-r2 时 58 秒无手却
     始终停在 left_pinch，说明失联保护在这条路径上不可达。
     """
 

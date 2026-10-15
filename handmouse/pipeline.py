@@ -21,7 +21,6 @@ from pathlib import Path
 
 from handmouse.config import AppConfig
 from handmouse.contracts import (
-    ActionCommand,
     DetectionPacket,
     FramePacket,
     GestureType,
@@ -33,8 +32,6 @@ from handmouse.contracts import (
 from handmouse.filters import CursorMotionInterpolator
 from handmouse.gestures import GestureEngine
 from handmouse.latest_slot import LatestSlot
-from handmouse.launch import LaunchDispatcher
-from handmouse.motion_gestures import MotionGestureEngine, MotionOutcome
 from handmouse.mouse import MouseController
 from handmouse.vision import CameraWorker, HandLandmarkerWorker, RollingRate, default_model_path
 
@@ -57,9 +54,6 @@ class ControlWorker(threading.Thread):
         stop_event: threading.Event,
         on_state: Callable[[GestureType, bool], None],
         interpolation_ms: int,
-        motion: MotionGestureEngine | None = None,
-        dispatcher: LaunchDispatcher | None = None,
-        on_motion: Callable[[MotionOutcome], None] | None = None,
     ) -> None:
         super().__init__(name="gesture-control", daemon=True)
         self.detections = detections
@@ -67,19 +61,10 @@ class ControlWorker(threading.Thread):
         self.mouse = mouse
         self.stop_event = stop_event
         self.on_state = on_state
-        self.motion_engine = motion
-        self.dispatcher = dispatcher
-        self.on_motion = on_motion
-        self.motion_state = motion.state if motion is not None else None
-        self.motion_outcome: MotionOutcome | None = None
-        self.last_action: str = ""
-        # 注意：``self.motion`` 是光标插值器（Vimoose 的命名），与上面的轨迹
-        # 手势引擎 ``self.motion_engine`` 是两件事，不要混。
         self.motion = CursorMotionInterpolator(
             min_duration_ms=12,
             max_duration_ms=interpolation_ms,
         )
-        self._motion_mode = False
 
     def _execute_commands(self, commands: list[MouseCommand]) -> None:
         now = time.monotonic_ns()
@@ -112,10 +97,6 @@ class ControlWorker(threading.Thread):
         self.mouse.execute_many(immediate)
 
     def _advance_motion(self, timestamp_ns: int) -> None:
-        if self._motion_mode:
-            # 轨迹手势期间光标必须完全冻结，连插值尾巴也不能漏出去。
-            self.motion.clear()
-            return
         if self.engine.paused or self.engine.current_gesture == GestureType.LOST:
             self.motion.clear()
             return
@@ -138,47 +119,7 @@ class ControlWorker(threading.Thread):
             ),
         )
 
-    # ---------------- 轨迹手势 ----------------
-    def _enter_motion_mode(self) -> None:
-        self._motion_mode = True
-        self.motion.clear()
-
-    def _leave_motion_mode(self) -> None:
-        if not self._motion_mode:
-            return
-        self._motion_mode = False
-        # 绘制期间滤波器没被喂数据，直接复用会导致恢复瞬间光标跳一下。
-        self.engine.filter.reset()
-        self.motion.clear()
-
-    def _dispatch(self, action: ActionCommand) -> None:
-        if self.dispatcher is None:
-            return
-        result = self.dispatcher.dispatch(action)
-        self.last_action = result.message
-        if not result.ok:
-            LOGGER.warning("动作未执行：%s", result.message)
-
     def _handle_observation(self, observation) -> None:
-        outcome: MotionOutcome | None = None
-        motion = self.motion_engine
-        if motion is not None and motion.config.motion_gestures_enabled:
-            outcome = motion.process(observation, observation.timestamp_ns)
-            self.motion_state = outcome.state
-            self.motion_outcome = outcome
-            if self.on_motion is not None:
-                self.on_motion(outcome)
-            if outcome.action is not None:
-                self._dispatch(outcome.action)
-
-        if outcome is not None and outcome.active:
-            self._enter_motion_mode()
-            # 只释放可能按住的左键，不把观测交给鼠标状态机。
-            self._execute_commands(self.engine.hold(observation.timestamp_ns))
-            self.on_state(outcome.gesture, self.engine.paused)
-            return
-
-        self._leave_motion_mode()
         commands = self.engine.process(observation)
         if self.engine.current_gesture in {
             GestureType.PINCH_ARMED,
@@ -190,20 +131,6 @@ class ControlWorker(threading.Thread):
         self._execute_commands(commands)
 
     def _handle_tick(self, timestamp_ns: int) -> None:
-        motion = self.motion_engine
-        if motion is not None:
-            outcome = motion.tick(timestamp_ns)
-            self.motion_state = outcome.state
-            self.motion_outcome = outcome
-            if self.on_motion is not None:
-                self.on_motion(outcome)
-            if outcome.action is not None:
-                self._dispatch(outcome.action)
-            if outcome.active:
-                self._execute_commands(self.engine.hold(timestamp_ns))
-                self.on_state(outcome.gesture, self.engine.paused)
-                return
-        self._leave_motion_mode()
         self._execute_commands(self.engine.tick(timestamp_ns))
         # tick 是最容易发生状态迁移的路径（手离画 → lost），但这里过去没有回调
         # on_state：迁移既不落 [状态] 日志，也不更新快照手势，表现为"手早就不在
@@ -221,8 +148,7 @@ class ControlWorker(threading.Thread):
                     revision = next_revision
                     if packet.observations:
                         self._handle_observation(packet.observations[0])
-                        if self.motion_outcome is None or not self.motion_outcome.active:
-                            self.on_state(self.engine.current_gesture, self.engine.paused)
+                        self.on_state(self.engine.current_gesture, self.engine.paused)
                     else:
                         self._handle_tick(packet.timestamp_ns)
                 self._handle_tick(now)
@@ -241,14 +167,11 @@ class GesturePipeline:
         config: AppConfig,
         mouse: MouseController,
         model_path: Path | None = None,
-        dispatcher: LaunchDispatcher | None = None,
     ) -> None:
         self.config = config
         self.mouse = mouse
         self.model_path = model_path or default_model_path()
         self.engine = GestureEngine(config)
-        self.motion_engine = MotionGestureEngine(config)
-        self.dispatcher = dispatcher
 
         self.frames: LatestSlot[FramePacket] = LatestSlot()
         self.detections: LatestSlot[DetectionPacket] = LatestSlot()
@@ -257,7 +180,6 @@ class GesturePipeline:
         self._threads: list[threading.Thread] = []
         self._lock = threading.RLock()
         self._snapshot = PipelineSnapshot()
-        self._control: ControlWorker | None = None
         self._capture_rate = RollingRate()
         self._inference_rate = RollingRate()
         self._process = psutil.Process() if psutil is not None else None
@@ -270,8 +192,6 @@ class GesturePipeline:
         self._detection_results: deque[tuple[int, bool]] = deque(maxlen=180)
         self._packets_total = 0
         self._hand_packets_total = 0
-        # 轨迹手势状态日志去重用的上一轮签名，避免每帧刷屏。
-        self._motion_signature: tuple[str, tuple[str, ...], str] | None = None
 
     @property
     def running(self) -> bool:
@@ -324,25 +244,6 @@ class GesturePipeline:
             else:
                 self._snapshot.metrics.palm_width_percent = 0.0
 
-    def _on_motion(self, outcome: MotionOutcome) -> None:
-        candidates = tuple(candidate.name for candidate in outcome.candidates)
-        with self._lock:
-            self._snapshot.motion_candidates = candidates
-            self._snapshot.motion_pending = outcome.pending
-            if outcome.active:
-                self._snapshot.message = outcome.message
-        # 只在轨迹状态/候选真正变化时记一行，用于实机复盘（悬停误触发、画完是否只出候选）。
-        signature = (outcome.state.value, candidates, outcome.pending)
-        if signature != self._motion_signature:
-            self._motion_signature = signature
-            LOGGER.info(
-                "[轨迹] state=%s candidates=%s pending=%s | %s",
-                outcome.state.value,
-                ",".join(candidates) or "-",
-                outcome.pending or "-",
-                outcome.message or "-",
-            )
-
     def _on_state(self, gesture: GestureType, paused: bool) -> None:
         with self._lock:
             previous = (self._snapshot.gesture, self._snapshot.paused)
@@ -378,12 +279,6 @@ class GesturePipeline:
                     self._snapshot.message = "食指局部续跟踪"
                 elif gesture == GestureType.PARTIAL_MIDDLE:
                     self._snapshot.message = "中指局部续跟踪"
-                elif gesture in {
-                    GestureType.MOTION_ARMED,
-                    GestureType.MOTION_DRAWING,
-                    GestureType.MOTION_CANDIDATE,
-                }:
-                    pass  # 轨迹手势的消息由 _on_motion 提供，避免互相覆盖
                 else:
                     self._snapshot.message = "等待手势"
         if (gesture, paused) != previous:
@@ -414,7 +309,6 @@ class GesturePipeline:
             self.detections = LatestSlot()
             self.preview = LatestSlot()
             self.engine = GestureEngine(self.config)
-            self.motion_engine = MotionGestureEngine(self.config)
 
         camera = CameraWorker(
             self.config,
@@ -440,11 +334,7 @@ class GesturePipeline:
             self.stop_event,
             self._on_state,
             self.config.cursor_interpolation_ms,
-            motion=self.motion_engine,
-            dispatcher=self.dispatcher,
-            on_motion=self._on_motion,
         )
-        self._control = control
         self._threads = [camera, landmarker, control]
         for thread in self._threads:
             thread.start()
@@ -491,10 +381,7 @@ class GesturePipeline:
             self.stop()
         self.config = config
         self.engine.update_config(config)
-        self.motion_engine.update_config(config)
         self.mouse.update_config(config)
-        if self.dispatcher is not None:
-            self.dispatcher.update_config(config)
         if was_running:
             self.start()
 
@@ -502,11 +389,6 @@ class GesturePipeline:
         frame, _ = self.preview.get_latest()
         detection, _ = self.detections.get_latest()
         return frame, detection
-
-    @property
-    def motion_outcome(self) -> MotionOutcome | None:
-        control = self._control
-        return control.motion_outcome if control is not None else None
 
     def snapshot(self) -> PipelineSnapshot:
         now = time.monotonic_ns()
@@ -534,9 +416,6 @@ class GesturePipeline:
                 metrics.latency_p50_ms = ordered[round((len(ordered) - 1) * 0.50)]
                 metrics.latency_p95_ms = ordered[round((len(ordered) - 1) * 0.95)]
 
-            control = self._control
-            if control is not None:
-                self._snapshot.last_action = control.last_action
             self._sample_resources(now)
 
             if self.mouse.last_error:

@@ -35,49 +35,5 @@
   "cursor_snap_enabled": true,
   "cursor_snap_radius_px": 30,
   "multi_monitor": false,
-  "virtual_desk_experimental": false,
-  "motion_gestures_enabled": true,
-  "motion_arm_hold_ms": 250,
-  "motion_arm_max_drift": 0.05,
-  "motion_min_duration_ms": 250,
-  "motion_min_path_px": 60.0,
-  "motion_template_points": 32,
-  "motion_max_candidates": 3,
-  "motion_accept_distance": 0.18,
-  "motion_confirm_timeout_ms": 2500,
-  "motion_confirm_pinch": 0.42,
-  "motion_hand_lost_ms": 200,
-  "motion_bindings": {
-    "W": {
-      "kind": "launch",
-      "target": "notepad"
-    },
-    "C": {
-      "kind": "launch",
-      "target": "calc"
-    },
-    "E": {
-      "kind": "launch",
-      "target": "explorer"
-    },
-    "X": {
-      "kind": "hotkey",
-      "target": "ctrl+w"
-    },
-    "CIRCLE": {
-      "kind": "hotkey",
-      "target": "win+d"
-    },
-    "LINE": {
-      "kind": "hotkey",
-      "target": "alt+tab"
-    }
-  },
-  "launch_enabled": true,
-  "launch_whitelist": {
-    "notepad": "notepad.exe",
-    "calc": "calc.exe",
-    "explorer": "explorer.exe",
-    "settings": "ms-settings:"
-  }
+  "virtual_desk_experimental": false
 }

@@ -81,10 +81,6 @@ class GestureType(str, Enum):
     # 进入门：手在画面里但尚未做出进入姿势，处于"闸门未开"态。一切下游
     # 手势（捏合/翻页/拖拽）在此态一律不执行，用来挡住幻影手势。
     GATE_IDLE = "gate_idle"
-    # 第二阶段：轨迹手势（DTW）
-    MOTION_ARMED = "motion_armed"
-    MOTION_DRAWING = "motion_drawing"
-    MOTION_CANDIDATE = "motion_candidate"
 
 
 class GesturePhase(str, Enum):
@@ -132,28 +128,6 @@ class MouseCommand:
     paused: bool | None = None
 
 
-class ActionType(str, Enum):
-    """轨迹手势确认后执行的"非鼠标"动作。"""
-
-    LAUNCH = "launch"
-    HOTKEY = "hotkey"
-    CANCEL = "cancel"
-
-
-@dataclass(frozen=True, slots=True)
-class ActionCommand:
-    """轨迹手势/LAUNCH 产生的动作指令。
-
-    与 ``MouseCommand`` 分开：这类动作需要白名单校验和键盘注入，语义与
-    "移动光标"完全不同，混进鼠标指令会让后端越权。
-    """
-
-    kind: ActionType
-    timestamp_ns: int
-    name: str = ""
-    target: str = ""
-
-
 @dataclass(slots=True)
 class RuntimeMetrics:
     """运行时性能快照。"""
@@ -189,8 +163,4 @@ class PipelineSnapshot:
     camera_signal_missing: bool = False
     camera_error: str | None = None
     snap_target_name: str | None = None
-    # 第二阶段：DTW 候选与待确认动作
-    motion_candidates: tuple[str, ...] = ()
-    motion_pending: str = ""
-    last_action: str = ""
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)

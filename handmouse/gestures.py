@@ -339,20 +339,6 @@ class GestureEngine:
 
         return self.set_paused(True, timestamp_ns)
 
-    def hold(self, timestamp_ns: int) -> list[MouseCommand]:
-        """轨迹手势进行中：冻结光标、释放已按下的左键、但不触发失联保护。
-
-        绘制期间观测帧不交给本状态机（否则捏合会被当成点击），但手其实一直
-        在线，所以必须自己续上 ``last_hand_ns``，不然 200ms 后 ``tick`` 会误报
-        手部丢失并把状态刷成 LOST。
-        """
-
-        self.last_hand_ns = monotonic_ns()
-        self._lost_reported = False
-        commands = self._release_left(timestamp_ns)
-        self._reset_transient()
-        return commands
-
     def process(self, observation: HandObservation) -> list[MouseCommand]:
         """处理一帧有效手部观测。"""
 
