@@ -104,6 +104,11 @@ class ControlWorker(threading.Thread):
                 immediate.append(command)
                 if command.kind == MouseCommandType.PAUSE:
                     self.motion.clear()
+        # 实机验证要靠日志复盘点/拖/滚有没有丢键，所以把非移动类指令记下来。
+        # WHEEL 是连续量、每帧都可能出，记了会淹没有用信息，故跳过。
+        for command in immediate:
+            if command.kind not in (MouseCommandType.MOVE, MouseCommandType.WHEEL):
+                LOGGER.info("[注入] %s", command.kind.value)
         self.mouse.execute_many(immediate)
 
     def _advance_motion(self, timestamp_ns: int) -> None:
@@ -258,6 +263,8 @@ class GesturePipeline:
         self._last_resource_sample_ns = 0
         self._latencies: deque[float] = deque(maxlen=600)
         self._detection_results: deque[tuple[int, bool]] = deque(maxlen=180)
+        # 轨迹手势状态日志去重用的上一轮签名，避免每帧刷屏。
+        self._motion_signature: tuple[str, tuple[str, ...], str] | None = None
 
     @property
     def running(self) -> bool:
@@ -308,54 +315,73 @@ class GesturePipeline:
                 self._snapshot.metrics.palm_width_percent = 0.0
 
     def _on_motion(self, outcome: MotionOutcome) -> None:
+        candidates = tuple(candidate.name for candidate in outcome.candidates)
         with self._lock:
-            self._snapshot.motion_candidates = tuple(
-                candidate.name for candidate in outcome.candidates
-            )
+            self._snapshot.motion_candidates = candidates
             self._snapshot.motion_pending = outcome.pending
             if outcome.active:
                 self._snapshot.message = outcome.message
+        # 只在轨迹状态/候选真正变化时记一行，用于实机复盘（悬停误触发、画完是否只出候选）。
+        signature = (outcome.state.value, candidates, outcome.pending)
+        if signature != self._motion_signature:
+            self._motion_signature = signature
+            LOGGER.info(
+                "[轨迹] state=%s candidates=%s pending=%s | %s",
+                outcome.state.value,
+                ",".join(candidates) or "-",
+                outcome.pending or "-",
+                outcome.message or "-",
+            )
 
     def _on_state(self, gesture: GestureType, paused: bool) -> None:
         with self._lock:
+            previous = (self._snapshot.gesture, self._snapshot.paused)
             self._snapshot.gesture = gesture
             self._snapshot.paused = paused
-            if self._snapshot.camera_error:
-                return
-            if self._snapshot.camera_signal_missing:
-                self._snapshot.message = "摄像头已打开，但没有有效视频画面"
-            elif paused:
-                self._snapshot.message = "控制已暂停"
-            elif gesture == GestureType.LOST:
-                self._snapshot.message = "未检测到有效手部"
-            elif gesture == GestureType.DRAG:
-                self._snapshot.message = "正在拖拽"
-            elif gesture == GestureType.SCROLL:
-                self._snapshot.message = "滚轮模式"
-            elif gesture == GestureType.PAGE_NEXT:
-                self._snapshot.message = "已翻到下一页"
-            elif gesture == GestureType.PAGE_PREVIOUS:
-                self._snapshot.message = "已翻到上一页"
-            elif gesture == GestureType.PINCH_ARMED:
-                self._snapshot.message = "点击位置已锁定"
-            elif gesture == GestureType.LEFT_PINCH:
-                self._snapshot.message = "左键捏合"
-            elif gesture == GestureType.RIGHT_PINCH:
-                self._snapshot.message = "右键捏合"
-            elif gesture == GestureType.POINTER:
-                self._snapshot.message = "正在控制光标"
-            elif gesture == GestureType.PARTIAL_INDEX:
-                self._snapshot.message = "食指局部续跟踪"
-            elif gesture == GestureType.PARTIAL_MIDDLE:
-                self._snapshot.message = "中指局部续跟踪"
-            elif gesture in {
-                GestureType.MOTION_ARMED,
-                GestureType.MOTION_DRAWING,
-                GestureType.MOTION_CANDIDATE,
-            }:
-                pass  # 轨迹手势的消息由 _on_motion 提供，避免互相覆盖
-            else:
-                self._snapshot.message = "等待手势"
+            # 摄像头出错时保留错误消息，但仍然要记录状态迁移（恢复过程靠日志复盘）。
+            if not self._snapshot.camera_error:
+                if self._snapshot.camera_signal_missing:
+                    self._snapshot.message = "摄像头已打开，但没有有效视频画面"
+                elif paused:
+                    self._snapshot.message = "控制已暂停"
+                elif gesture == GestureType.LOST:
+                    self._snapshot.message = "未检测到有效手部"
+                elif gesture == GestureType.DRAG:
+                    self._snapshot.message = "正在拖拽"
+                elif gesture == GestureType.SCROLL:
+                    self._snapshot.message = "滚轮模式"
+                elif gesture == GestureType.PAGE_NEXT:
+                    self._snapshot.message = "已翻到下一页"
+                elif gesture == GestureType.PAGE_PREVIOUS:
+                    self._snapshot.message = "已翻到上一页"
+                elif gesture == GestureType.PINCH_ARMED:
+                    self._snapshot.message = "点击位置已锁定"
+                elif gesture == GestureType.LEFT_PINCH:
+                    self._snapshot.message = "左键捏合"
+                elif gesture == GestureType.RIGHT_PINCH:
+                    self._snapshot.message = "右键捏合"
+                elif gesture == GestureType.POINTER:
+                    self._snapshot.message = "正在控制光标"
+                elif gesture == GestureType.PARTIAL_INDEX:
+                    self._snapshot.message = "食指局部续跟踪"
+                elif gesture == GestureType.PARTIAL_MIDDLE:
+                    self._snapshot.message = "中指局部续跟踪"
+                elif gesture in {
+                    GestureType.MOTION_ARMED,
+                    GestureType.MOTION_DRAWING,
+                    GestureType.MOTION_CANDIDATE,
+                }:
+                    pass  # 轨迹手势的消息由 _on_motion 提供，避免互相覆盖
+                else:
+                    self._snapshot.message = "等待手势"
+        if (gesture, paused) != previous:
+            LOGGER.info(
+                "[状态] %s(paused=%s) → %s(paused=%s)",
+                previous[0].value,
+                previous[1],
+                gesture.value,
+                paused,
+            )
 
     def start(self) -> bool:
         with self._lock:

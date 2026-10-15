@@ -51,6 +51,11 @@ python -m handmouse --list-bindings      # 打印轨迹动作绑定与 LAUNCH �
 
 首次运行会在 EXE/仓库同级目录生成 `config.json`（内容与 dataclass 默认值一致）。
 
+> **入口唯一**：第一阶段遗留的 `main.py` 与 `gesture/` 包已删除，仓库里只有 `handmouse`
+> 这一个入口，一律用 `python -m handmouse [--safe-mode]`。若需要回看旧代码，见 git 标签
+> `pre-cleanup-main-gesture`（`git show pre-cleanup-main-gesture:main.py`）。
+
+
 **建议第一次按这个顺序验证**（每步可单独中断）：
 
 1. `python -m handmouse --safe-mode` → 确认系统光标**完全不动**，骨架/轨迹/HUD 正常。
@@ -220,7 +225,6 @@ pyinstaller handmouse.spec      # 产物 dist/handmouse.exe（单文件）
 - **多屏未实机验证**：归一化与 `MOUSEEVENTF_VIRTUALDESK` 已按虚拟桌面写好，但只在单屏机上跑过。
 - **磁吸默认需要 `uia` extra**：跨进程 UIA 调用在某些窗口上会慢，按可选功能处理。
 - **无托盘/设置面板**：只能改 `config.json` 与 CLI flags。
-- **第一阶段 `main.py` + `gesture/` 包仍在仓库里**：已被 `handmouse` 取代，两者不可混用。
 
 ## 许可
 
