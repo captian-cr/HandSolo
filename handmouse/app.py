@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from handmouse import __version__, debug_view, guided
-from handmouse.config import AppConfig, ConfigStore
+from handmouse.config import PROJECT_ROOT, AppConfig, ConfigStore
 from handmouse.hotkeys import HotkeyMonitor
 from handmouse.launch import LaunchDispatcher
 from handmouse.mouse import MouseController, NullMouseBackend, Win32MouseBackend
@@ -154,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_bindings(config)
         return 0
 
+    recorder: guided.FrameRecorder | None = None
     if args.guided:
         steps = guided.build_steps()
         if args.diagnostic_seconds <= 0:
@@ -161,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
             args.diagnostic_seconds = guided.total_seconds(steps) + 2.0
         print(f"[引导] 共 {len(steps)} 个节拍，约 {guided.total_seconds(steps):.0f} 秒；"
               "请只跟随 [步骤] 提示操作，中途不要碰键盘。")
+        recorder = guided.FrameRecorder(
+            PROJECT_ROOT / "logs" / f"frames-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
+        guided.attach_event_trigger(recorder)
+        print(f"[取证] 事件抓帧已开启：[状态]/[注入]/[轨迹]/节拍边界自动存图到 {recorder.directory}")
 
     screen_map = ScreenMap(
         multi_monitor=config.multi_monitor,
@@ -212,7 +218,10 @@ def main(argv: list[str] | None = None) -> int:
         pipeline.set_paused(True)
         print("默认未接管鼠标：按 M 或 Ctrl+Alt+G 开始接管。")
     if args.guided:
-        guided.start_prompter(pipeline.stop_event)
+        guided.start_prompter(
+            pipeline.stop_event,
+            on_step=lambda index, _prompt: recorder.request(f"步骤-{index:02d}"),
+        )
 
     scale = system_dpi_scale()
     deadline = (
@@ -240,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
                     config,
                     _pinch_ratio(detection),
                 )
+                if recorder is not None:
+                    recorder.capture(view)
                 key = debug_view.present(debug_view.WINDOW_NAME, view, scale)
                 if not _handle_key(key, state, pipeline, config):
                     break
@@ -255,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         mouse.shutdown()
         debug_view.close()
 
+    if recorder is not None:
+        print(f"[取证] 共保存 {recorder.saved} 帧到 {recorder.directory}")
     print(f"退出。DPI={dpi_state()}")
     return exit_code
 
