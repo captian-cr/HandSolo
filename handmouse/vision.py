@@ -270,12 +270,32 @@ class CameraWorker(threading.Thread):
 
         sequence = 0
         consecutive_failures = 0
+        # 采集层诊断：上一帧内容采样与采集时刻，用于判"冻结 vs 慢活"和帧间隔。
+        # 仅在 VERBOSE_GATE 下写入，生产路径零变化。
+        prev_sample: tuple[float, float] | None = None
+        prev_captured_ns: int | None = None
         try:
             while not self.stop_event.is_set():
+                read_start_ns = time.monotonic_ns()
                 ok, frame = capture.read()
                 captured_ns = time.monotonic_ns()
+                read_ms = (captured_ns - read_start_ns) / 1_000_000
                 if not ok or frame is None:
                     consecutive_failures += 1
+                    if VERBOSE_GATE:
+                        # 无内容可采样，单独一行：ok/耗时/间隔打在同一条，用于区分
+                        # "真失败（ok=False）"与"旧帧回放（ok=True 但内容不变）"。
+                        gap_ms = (
+                            (captured_ns - prev_captured_ns) / 1_000_000
+                            if prev_captured_ns is not None
+                            else -1.0
+                        )
+                        _DIAG_LOGGER.info(
+                            "cap seq=%d read_ms=%.1f ok=False frame=None gap_ms=%.1f "
+                            "captured_ns=%d failures=%d",
+                            sequence, read_ms, gap_ms, captured_ns,
+                            consecutive_failures,
+                        )
                     if consecutive_failures >= self.RECONNECT_AFTER_FAILURES:
                         self.on_warning("摄像头已断开，正在尝试重连…")
                         capture.release()
@@ -294,6 +314,34 @@ class CameraWorker(threading.Thread):
                 brightness = self._brightness(frame)
                 frame = self._enhance_low_light(frame, brightness)
                 sequence += 1
+                if VERBOSE_GATE:
+                    # 采样交付帧（镜像+低光增强之后）的全局均值/标准差：
+                    # 冻结帧逐字节相同 → 采样值完全相等、差值恒为 0；慢活帧即使
+                    # 只有 1Hz 也会因传感器噪声抖动。用差值是否为 0 直接分开
+                    # "旧帧回放"和"低帧率活采"，不需要全帧哈希。
+                    small = cv2.resize(frame, (80, 60), interpolation=cv2.INTER_AREA)
+                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                    mean_v, std_v = cv2.meanStdDev(gray)
+                    sample = (float(mean_v[0][0]), float(std_v[0][0]))
+                    prev = prev_sample
+                    gap_ms = (
+                        (captured_ns - prev_captured_ns) / 1_000_000
+                        if prev_captured_ns is not None
+                        else -1.0
+                    )
+                    _DIAG_LOGGER.info(
+                        "cap seq=%d read_ms=%.1f ok=True frame=%dx%d "
+                        "mean=%.4f std=%.4f dmean=%s dstd=%s dup=%s "
+                        "brightness=%.2f gap_ms=%.1f captured_ns=%d",
+                        sequence, read_ms, frame.shape[1], frame.shape[0],
+                        sample[0], sample[1],
+                        f"{sample[0] - prev[0]:+.5f}" if prev is not None else "n/a",
+                        f"{sample[1] - prev[1]:+.5f}" if prev is not None else "n/a",
+                        prev is not None and sample == prev,
+                        brightness, gap_ms, captured_ns,
+                    )
+                    prev_sample = sample
+                    prev_captured_ns = captured_ns
                 packet = FramePacket(
                     frame=frame,
                     sequence=sequence,
