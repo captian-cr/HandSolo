@@ -67,6 +67,28 @@ def build_steps() -> list[tuple[float, str]]:
     return steps
 
 
+def build_gate_diag_steps() -> list[tuple[float, str]]:
+    """进入门定性定点：30s 内 6 段固定姿势，一次覆盖 A-F 所有断点。
+
+    每段 5s，操作者只做一个动作，减少变量。分段严格对应诊断日志里的时序：
+      0–5s   正确进入姿势 → 验证门能否打开、handedness 报什么
+      5–10s  手背朝镜 → 验证误进防护
+      10–15s 侧掌 → 验证 palm_frontal_ratio 是否压低
+      15–20s 半握 → 验证 finger_exts 哪些 False
+      20–25s 单食指伸出 → 验证是否走 partial 抢占
+      25–30s 手出画 → 验证 lost 是否触发（看 [状态] 日志）
+    """
+
+    return [
+        (5, "进入门诊断 1/6：掌心朝镜 + 五指张开，保持不动（验证门能否打开 + handedness 报什么）"),
+        (5, "进入门诊断 2/6：手背朝镜，保持不动（应始终 gate_idle）"),
+        (5, "进入门诊断 3/6：侧掌（掌面垂直镜头），保持不动（palm_frontal_ratio 应压低）"),
+        (5, "进入门诊断 4/6：半握，保持不动（finger_exts 应有 False）"),
+        (5, "进入门诊断 5/6：只伸食指，其余握拳（验证是否走 partial 抢占）"),
+        (5, "进入门诊断 6/6：手完全移出画面（验证 lost 是否触发）"),
+    ]
+
+
 def total_seconds(steps: list[tuple[float, str]]) -> float:
     return sum(duration for duration, _prompt in steps)
 

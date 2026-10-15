@@ -78,6 +78,12 @@ def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float
 
 LOGGER = logging.getLogger(__name__)
 
+# 进入门诊断开关：环境变量控制，跨模块生效。
+VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_DIAG_LOGGER = logging.getLogger("handmouse.gate-diag")
+
 
 @dataclass(frozen=True, slots=True)
 class RecognitionTransform:
@@ -475,6 +481,47 @@ class HandLandmarkerWorker(threading.Thread):
                 )
         elif not self.config.partial_finger_tracking:
             self._partial_tracker.reset()
+
+        # -------- 进入门诊断：MediaPipe 原始输出层 --------
+        # 限流：每帧打摘要；hand_count 或 handedness 值变化时追加完整明细。
+        if VERBOSE_GATE:
+            raw_hand_count = len(result.hand_landmarks)
+            # 显式展开 handedness_raw：每手取 top classification 的 (label, score)
+            raw_handedness: list[tuple[str, float]] = []
+            for hc in result.handedness[:raw_hand_count]:
+                if hc:
+                    top = hc[0]
+                    raw_handedness.append((top.category_name, float(top.score)))
+                else:
+                    raw_handedness.append(("", 0.0))
+            raw_sig = (raw_hand_count, tuple(raw_handedness))
+            ts_ns = callback_ns
+
+            # 每帧摘要（轻量，无变化检测）
+            _DIAG_LOGGER.info(
+                "raw ts=%d hand_count=%d handedness_raw=%s observations_out=%d face_filtered=%s",
+                ts_ns, raw_hand_count,
+                [(label, f"{score:.2f}") for label, score in raw_handedness],
+                len(observations),
+                len(observations) < raw_hand_count,
+            )
+
+            # 值变化时追加完整明细（去重用 signature）
+            if raw_sig != getattr(self, "_gate_diag_last_raw_sig", None):
+                self._gate_diag_last_raw_sig = raw_sig
+                for i, obs in enumerate(observations):
+                    landmarks_len = (
+                        len(obs.landmarks)
+                        if obs.landmarks
+                        else ("partial" if obs.partial_finger else 0)
+                    )
+                    _DIAG_LOGGER.info(
+                        "raw-detail ts=%d hand[%d] landmarks_len=%s handedness=%s score=%.2f "
+                        "partial_finger=%s",
+                        ts_ns, i, landmarks_len,
+                        obs.handedness or '""', obs.handedness_score,
+                        obs.partial_finger or "None",
+                    )
 
         packet = DetectionPacket(
             observations=tuple(observations),

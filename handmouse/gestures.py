@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from math import acos, degrees, hypot, sqrt
@@ -163,6 +165,13 @@ def _palm_presented(points: tuple[Landmark, ...], handedness: str) -> bool:
     return cross > 0.0 if handedness == "Right" else cross < 0.0
 
 
+# 进入门诊断开关：环境变量控制，跨模块生效。
+VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_DIAG_LOGGER = logging.getLogger("handmouse.gate-diag")
+
+
 @dataclass(slots=True)
 class GestureDebug:
     """最近一次识别的几何量，便于后续校准。"""
@@ -186,6 +195,9 @@ class GestureEngine:
         # 进入门：entry_gate_enabled 关闭时恒为 True，与旧行为完全等价。
         self._gate_active = not config.entry_gate_enabled
         self._entry_started_ns: int | None = None
+        # 诊断用：进入门几何判定层的帧计数和去重缓存
+        self._gate_diag_frame = 0
+        self._gate_diag_last_sig: tuple | None = None
 
         self._left_active = False
         self._left_started_ns: int | None = None
@@ -339,6 +351,114 @@ class GestureEngine:
                 return self.tick(observation.timestamp_ns)
 
         now = observation.timestamp_ns
+
+        # -------- 进入门诊断：几何判定层 --------
+        # 限流：每 5 帧（~6Hz）+ gate_eligible/palm_presented/five_open 任一变 True 时立即打。
+        # 相同内容去重用 signature。所有新计算都包在 if VERBOSE_GATE 内。
+        if VERBOSE_GATE:
+            self._gate_diag_frame += 1
+            should_log = False
+
+            if len(points) == 21:
+                # ---- 完整几何量 ----
+                finger_exts = _finger_extensions(points)
+                all_ext = all(finger_exts)
+                palm_w = _palm_width(points)
+                span = _distance_2d(points[0], points[12])
+                palm_frontal_ratio = palm_w / span if span >= 1e-6 else 0.0
+                five_open = all_ext and (
+                    _distance_2d(points[4], points[17]) / palm_w >= _ENTRY_THUMB_SPREAD_MIN
+                )
+
+                hn = observation.handedness
+                hn_valid = hn in ("Left", "Right")
+
+                palm_presented = False
+                if hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN and span >= 1e-6:
+                    across_x = points[17].x - points[5].x
+                    across_y = points[17].y - points[5].y
+                    thumb_x = points[4].x - points[5].x
+                    thumb_y = points[4].y - points[5].y
+                    cross = across_x * thumb_y - across_y * thumb_x
+                    expected_sign = 1.0 if hn == "Right" else -1.0
+                    cross_match = (cross > 0.0) if hn == "Right" else (cross < 0.0)
+                    palm_presented = cross_match and abs(cross) >= 1e-9
+                else:
+                    cross = 0.0
+                    expected_sign = 0.0
+                    cross_match = False
+
+                gate_eligible = (not self._gate_active) and five_open and palm_presented
+                held_ms = (now - self._entry_started_ns) / 1_000_000 if self._entry_started_ns else 0.0
+
+                sig = (
+                    self._gate_active, gate_eligible, palm_presented,
+                    five_open, all_ext, hn_valid,
+                )
+
+                # 立即打条件：任一关键布尔量变 True
+                if sig != self._gate_diag_last_sig:
+                    should_log = True
+                elif self._gate_diag_frame % 5 == 0:
+                    should_log = True
+
+                if should_log:
+                    self._gate_diag_last_sig = sig
+                    _DIAG_LOGGER.info(
+                        "geom ts=%d gate_active=%s entry_started=%s held_ms=%.0f state=%s gesture=%s",
+                        now, self._gate_active,
+                        self._entry_started_ns is not None, held_ms,
+                        self.state.value, self.current_gesture.value,
+                    )
+                    _DIAG_LOGGER.info(
+                        "  palm_width=%.4f span=%.4f frontal_ratio=%.4f(min=%.2f) "
+                        "→ palm_presented=%s hn=%s valid=%s",
+                        palm_w, span, palm_frontal_ratio, _ENTRY_PALM_FRONTAL_MIN,
+                        palm_presented, hn or '""', hn_valid,
+                    )
+                    _DIAG_LOGGER.info(
+                        "  k0=(%.3f,%.3f,%.3f) k4=(%.3f,%.3f,%.3f) k5=(%.3f,%.3f,%.3f)",
+                        points[0].x, points[0].y, points[0].z,
+                        points[4].x, points[4].y, points[4].z,
+                        points[5].x, points[5].y, points[5].z,
+                    )
+                    _DIAG_LOGGER.info(
+                        "  k8=(%.3f,%.3f,%.3f) k9=(%.3f,%.3f,%.3f) k12=(%.3f,%.3f,%.3f) k17=(%.3f,%.3f,%.3f)",
+                        points[8].x, points[8].y, points[8].z,
+                        points[9].x, points[9].y, points[9].z,
+                        points[12].x, points[12].y, points[12].z,
+                        points[17].x, points[17].y, points[17].z,
+                    )
+                    _DIAG_LOGGER.info(
+                        "  finger_exts=(%s,%s,%s,%s) all_ext=%s thumb_spread=%.4f(min=%.2f) "
+                        "→ five_open=%s",
+                        *finger_exts, all_ext,
+                        _distance_2d(points[4], points[17]) / palm_w,
+                        _ENTRY_THUMB_SPREAD_MIN, five_open,
+                    )
+                    if hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
+                        _DIAG_LOGGER.info(
+                            "  cross=%.6f expected_sign=%s cross_match=%s → gate_eligible=%s",
+                            cross, "+1" if expected_sign > 0 else "-1",
+                            cross_match, gate_eligible,
+                        )
+                    else:
+                        _DIAG_LOGGER.info(
+                            "  cross=(skip) expected_sign=N/A → gate_eligible=%s",
+                            gate_eligible,
+                        )
+            else:
+                # landmarks 不完整（partial 或真 0 点）：简单限流
+                if self._gate_diag_frame % 5 == 0:
+                    _DIAG_LOGGER.info(
+                        "geom ts=%d landmarks_len=%d partial_finger=%s "
+                        "gate_active=%s held_ms=%.0f",
+                        now, len(points),
+                        observation.partial_finger or "None",
+                        self._gate_active,
+                        (now - (self._entry_started_ns or now)) / 1_000_000,
+                    )
+
         # ---- 进入门（测量域闸门）----
         # 未进入控制态时只评估"进入姿势"，捏合/翻页/拖拽等下游判定一概不跑。
         # 这样脸被误判成手时最多停在 gate_idle，幻影手势连控制态都进不去。

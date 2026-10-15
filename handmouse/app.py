@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -90,6 +91,13 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "未指定 --diagnostic-seconds 时自动在脚本结束后输出诊断并退出",
     )
     parser.add_argument(
+        "--gate-diag",
+        action="store_true",
+        help="进入门定性定点：30s 内 6 段固定姿势序列，用于定位进入门判定链断点。"
+        "隐含 --diagnostic-seconds 30 和 --safe-mode。"
+        "需同时设置环境变量 HANDMOUSE_VERBOSE_GATE=1 才能启用诊断日志。",
+    )
+    parser.add_argument(
         "--list-bindings",
         action="store_true",
         help="打印当前轨迹动作绑定与 LAUNCH 白名单后退出",
@@ -147,6 +155,24 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # 进入门诊断开关：环境变量控制，跨模块生效。
+    # 诊断日志走独立 FileHandler，不写进主日志。
+    verbose_gate = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if verbose_gate:
+        import logging.handlers
+        diag_dir = PROJECT_ROOT / "logs"
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        diag_path = diag_dir / f"gate-diag-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        diag_logger = logging.getLogger("handmouse.gate-diag")
+        diag_logger.setLevel(logging.INFO)
+        diag_logger.propagate = False
+        handler = logging.FileHandler(str(diag_path), encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        diag_logger.addHandler(handler)
+        print(f"[诊断] HANDMOUSE_VERBOSE_GATE=1 已启用，诊断日志 → {diag_path}")
+
     store = ConfigStore(args.config)
     config = _apply_cli_overrides(store.load(), args)
 
@@ -155,6 +181,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     recorder: guided.FrameRecorder | None = None
+    # gate-diag 模式：独立于完整 guided 的 30s 6 段姿势序列
+    gate_diag_steps: list[tuple[float, str]] | None = None
+    if args.gate_diag:
+        gate_diag_steps = guided.build_gate_diag_steps()
+        args.diagnostic_seconds = 30.0
+        args.safe_mode = True
+        print(f"[进入门诊断] 共 {len(gate_diag_steps)} 段 × 5s = 30s，safe-mode 已开启。"
+              "请严格按 [步骤] 提示操作。")
+
     if args.guided:
         steps = guided.build_steps()
         if args.diagnostic_seconds <= 0:
@@ -222,6 +257,16 @@ def main(argv: list[str] | None = None) -> int:
             pipeline.stop_event,
             on_step=lambda index, _prompt: recorder.request(f"步骤-{index:02d}"),
         )
+    elif gate_diag_steps is not None:
+        # 复用 start_prompter 的逻辑：传 stop_event 和 steps 覆盖
+        import threading as _threading
+        def _run_gate_diag() -> None:
+            for index, (duration, prompt) in enumerate(gate_diag_steps, start=1):
+                if pipeline.stop_event.is_set():
+                    return
+                print(f"[步骤] {time.strftime('%H:%M:%S')} ({index}/{len(gate_diag_steps)}) {prompt}")
+                pipeline.stop_event.wait(duration)
+        _threading.Thread(target=_run_gate_diag, name="gate-diag-prompter", daemon=True).start()
 
     scale = system_dpi_scale()
     deadline = (
