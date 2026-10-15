@@ -61,7 +61,7 @@ def build_steps() -> list[tuple[float, str]]:
         steps.append((6, f"第5步 {shape}：现在捏合确认"))
     steps += [
         (15, "第6步：用手掌或纸板完全盖住镜头 3 秒，然后拿开（手出画应退出控制态）"),
-        (45, "第6步：到设备管理器禁用摄像头，再启用（禁用设备，非拔 USB——两者对引擎是不同的外设事件）；然后手回画面动一下（需重新进入）"),
+        (45, "第6步：引擎将自动暂停 3 秒后恢复（不碰相机硬件，验引擎级降级恢复）；恢复后手回画面动一下（需重新进入）"),
         (5, "结束：保持不动，等待诊断输出"),
     ]
     return steps
@@ -96,11 +96,15 @@ def total_seconds(steps: list[tuple[float, str]]) -> float:
 def start_prompter(
     stop_event: threading.Event,
     on_step: Callable[[int, str], None] | None = None,
+    step_actions: dict[int, Callable[[], None]] | None = None,
 ) -> threading.Thread:
     """后台线程：按节拍打印 ``[步骤] HH:MM:SS 提示语``，播完即止。
 
     ``on_step(index, prompt)`` 在每个节拍打印后回调，用于让取证抓帧在
     节拍边界留一张"此刻画面"。
+
+    ``step_actions`` 是 {步骤序号: 回调} 映射，在对应节拍打印后、on_step
+    之后调用，用于在特定步骤触发引擎动作（如第 25 步自动暂停/恢复）。
     """
 
     steps = build_steps()
@@ -112,6 +116,8 @@ def start_prompter(
             print(f"[步骤] {time.strftime('%H:%M:%S')} ({index}/{len(steps)}) {prompt}")
             if on_step is not None:
                 on_step(index, prompt)
+            if step_actions is not None and index in step_actions:
+                step_actions[index]()
             stop_event.wait(duration)
 
     thread = threading.Thread(target=_run, name="guided-prompter", daemon=True)

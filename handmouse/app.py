@@ -19,6 +19,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict
 from math import hypot
@@ -252,9 +253,22 @@ def main(argv: list[str] | None = None) -> int:
         pipeline.set_paused(True)
         print("默认未接管鼠标：按 M 或 Ctrl+Alt+G 开始接管。")
     if args.guided:
+        # 第 25 步（H5' 引擎级降级恢复）：自动暂停 3 秒后恢复，不碰相机硬件。
+        # 暂停期间应无注入；恢复后手回画面应能重新进入操控态。
+        def _step25_pause_resume() -> None:
+            pipeline.set_paused(True)
+
+            def _resume() -> None:
+                time.sleep(3.0)
+                if not pipeline.stop_event.is_set():
+                    pipeline.set_paused(False)
+
+            threading.Thread(target=_resume, name="guided-step25-resume", daemon=True).start()
+
         guided.start_prompter(
             pipeline.stop_event,
             on_step=lambda index, _prompt: recorder.request(f"步骤-{index:02d}"),
+            step_actions={25: _step25_pause_resume},
         )
     elif gate_diag_steps is not None:
         # 复用 start_prompter 的逻辑：传 stop_event 和 steps 覆盖
