@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from handmouse.contracts import HandObservation, Landmark
 
 
@@ -166,3 +168,38 @@ def observation(
         inference_ms=12.0,
         handedness_score=0.98,
     )
+
+
+class ArrivalClock:
+    """可控的"到达墙钟"，用于替代 ``handmouse.gestures`` 里的 ``monotonic_ns``。"""
+
+    def __init__(self, start_ns: int = 0) -> None:
+        self.now_ns = start_ns
+
+    def __call__(self) -> int:
+        return self.now_ns
+
+    def set_ns(self, value: int) -> None:
+        self.now_ns = value
+
+    def advance_ms(self, ms: float) -> int:
+        self.now_ns += int(ms * 1_000_000)
+        return self.now_ns
+
+
+@pytest.fixture(autouse=True)
+def arrival_clock(monkeypatch) -> ArrivalClock:
+    """把 GestureEngine 的到达墙钟换成可控时钟，默认冻结在 0。
+
+    ``last_hand_ns`` 记的是"观测到达控制线程的墙钟时刻"，测试里必须与 ``tick()``
+    传入的墙钟参数同源，否则 elapsed 会落成负值或跨域。冻结在 0 时 ``tick(BASE + Δ)``
+    的 elapsed 恰为 Δ，既有用例的语义不变；需要区分"采集时刻 vs 到达时刻"的用例
+    再显式驱动这个时钟。
+    """
+
+    from handmouse import gestures as gestures_module
+
+    clock = ArrivalClock()
+    monkeypatch.setattr(gestures_module, "monotonic_ns", clock)
+    return clock
+

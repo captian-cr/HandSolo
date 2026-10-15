@@ -1,7 +1,9 @@
 """跨线程传递的数据契约。
 
 所有时间戳均使用 ``time.monotonic_ns()`` 的同一时钟域，避免系统时间调整
-造成状态机误判。
+造成状态机误判。注意二者虽同域但参考点不同：``HandObservation.timestamp_ns``
+是**采集时刻**（由 ``captured_ns`` 量化到毫秒），状态机里的"现在"是**到达
+墙钟**；跨用会把"取包延迟 + 帧间隔"算成经过时间。
 """
 
 from __future__ import annotations

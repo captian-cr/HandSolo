@@ -190,6 +190,8 @@ class GestureEngine:
         self.state = ControlState.IDLE
         self.current_gesture = GestureType.NONE
         self.paused = False
+        # 最近一帧有效观测"到达控制线程"的墙钟时刻。tick() 的失联判定用的也是
+        # 墙钟，两者必须同源；若记采集时刻戳，elapsed 会混入取包延迟而假性失联。
         self.last_hand_ns: int | None = None
         self.debug = GestureDebug()
         # 进入门：entry_gate_enabled 关闭时恒为 True，与旧行为完全等价。
@@ -203,9 +205,9 @@ class GestureEngine:
         self._gate_diag_prev_eligible = False
         self._gate_diag_eligible_flips = 0
         # 诊断用：最近一次观测被 process() 消费的墙钟时刻（到达时刻戳）。
-        # 与 last_hand_ns（采集时刻戳）配对，可把 tick() 的 elapsed 拆成
-        # "取包延迟"(arrival-last_hand_ns) 与 "消费后空转"(now-arrival) 两段。
-        # 仅在 VERBOSE_GATE 下写入，生产路径零变化。
+        # 笔1 之后 last_hand_ns 已改用同一到达时刻打点，本字段因此恒等于
+        # last_hand_ns（差值为 0），tick() 的 elapsed 不再含"取包延迟"段；
+        # 取包延迟改用 pipeline 的 [采样] latency_ms 观察。仅在 VERBOSE_GATE 下写入。
         self._last_hand_arrival_ns: int | None = None
 
         self._left_active = False
@@ -345,7 +347,7 @@ class GestureEngine:
         手部丢失并把状态刷成 LOST。
         """
 
-        self.last_hand_ns = timestamp_ns
+        self.last_hand_ns = monotonic_ns()
         self._lost_reported = False
         commands = self._release_left(timestamp_ns)
         self._reset_transient()
@@ -354,10 +356,16 @@ class GestureEngine:
     def process(self, observation: HandObservation) -> list[MouseCommand]:
         """处理一帧有效手部观测。"""
 
+        # 到达时刻戳：本帧交付到控制线程的墙钟时刻。tick() 的失联判定用的是
+        # 墙钟，last_hand_ns 必须记在同一时钟上；若沿用 observation.timestamp_ns
+        # （采集时刻戳），elapsed = 墙钟 now - 采集时刻 会把"取包延迟 + 帧间隔"
+        # 算成经过时间，10Hz 下即可逼近甚至越过 hand_lost_ms 而假性失联。
+        arrival_ns = monotonic_ns()
         points = observation.landmarks
         if self.config.handedness != "Any" and observation.handedness:
             if observation.handedness != self.config.handedness:
-                return self.tick(observation.timestamp_ns)
+                # handedness 不符时本帧按"无有效观测"处理，同样交给墙钟。
+                return self.tick(arrival_ns)
 
         now = observation.timestamp_ns
 
@@ -366,8 +374,9 @@ class GestureEngine:
         # 相同内容去重用 signature。所有新计算都包在 if VERBOSE_GATE 内。
         if VERBOSE_GATE:
             self._gate_diag_frame += 1
-            # 到达时刻戳：本帧从检测包交付到控制线程的墙钟时刻。
-            self._last_hand_arrival_ns = monotonic_ns()
+            # 到达时刻戳：与本帧 last_hand_ns 同源（同一个 arrival_ns），
+            # 因此 elapsed 拆分里的 dwell 段在笔1后恒为 0。
+            self._last_hand_arrival_ns = arrival_ns
             should_log = False
 
             if len(points) == 21:
@@ -487,7 +496,7 @@ class GestureEngine:
         # 未进入控制态时只评估"进入姿势"，捏合/翻页/拖拽等下游判定一概不跑。
         # 这样脸被误判成手时最多停在 gate_idle，幻影手势连控制态都进不去。
         if not self._gate_active:
-            self.last_hand_ns = now
+            self.last_hand_ns = arrival_ns
             self._lost_reported = False
             if (
                 len(points) == 21
@@ -513,7 +522,7 @@ class GestureEngine:
         if observation.partial_finger and observation.partial_position is not None:
             commands = self._release_left(now)
             self._reset_transient()
-            self.last_hand_ns = now
+            self.last_hand_ns = arrival_ns
             self._lost_reported = False
             if self.paused:
                 self.state = ControlState.PAUSED
@@ -531,7 +540,7 @@ class GestureEngine:
         if len(points) != 21:
             return []
 
-        self.last_hand_ns = now
+        self.last_hand_ns = arrival_ns
         self._lost_reported = False
         width = _palm_width(points)
         left_ratio = _distance_2d(points[4], points[8]) / width

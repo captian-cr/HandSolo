@@ -462,6 +462,62 @@ def test_pointer_falls_back_to_lost_when_hand_disappears() -> None:
     assert engine.current_gesture.value == "lost"
 
 
+# ---------------- 时间域统一（笔1）：真 lost 回归 ----------------
+
+
+def test_lost_not_triggered_while_hand_stays_in_view(arrival_clock) -> None:
+    """手持续在画面：到达间隔（10Hz = 100ms）远小于 hand_lost_ms，不得失联。"""
+
+    config = AppConfig()
+    engine = GestureEngine(config)
+    for step in range(5):
+        timestamp_ns = BASE + step * 100_000_000
+        arrival_clock.set_ns(timestamp_ns)
+        engine.process(observation(pointer_points(), timestamp_ns))
+
+    # 最后一帧到达后只隔一个帧间隔就 tick：手一直在交付路径上。
+    engine.tick(BASE + 500_000_000)
+
+    assert engine.current_gesture.value != "lost"
+
+
+def test_lost_triggered_when_hand_leaves_view(arrival_clock) -> None:
+    """真 lost 必须仍会触发：出画后到达间隔 ≥ hand_lost_ms。
+
+    时间域统一不能把真出画也一起修没——r3 第 25 节拍那种手离画场景要能复现 lost。
+    """
+
+    config = AppConfig()
+    engine = GestureEngine(config)
+    arrival_clock.set_ns(BASE)
+    engine.process(observation(pointer_points(), BASE))
+    assert engine.current_gesture.value == "pointer"
+
+    engine.tick(BASE + (config.hand_lost_ms + 50) * 1_000_000)
+
+    assert engine.current_gesture.value == "lost"
+
+
+def test_lost_not_triggered_by_packet_delivery_delay(arrival_clock) -> None:
+    """本次 bug 的直接回归：取包延迟不得再被算成手部失联。
+
+    采集时刻戳落后到达墙钟 200ms（r3 实测取包延迟 p95=78ms、10Hz 帧间隔 100ms），
+    修复前 elapsed = 墙钟 now - 采集时刻 ≈ 200ms，刚好越过 hand_lost_ms 触发假性
+    lost，把进入门的保持计时每轮清零。
+    """
+
+    config = AppConfig()
+    engine = GestureEngine(config)
+    capture_ns = BASE
+    arrival_clock.set_ns(BASE + 200_000_000)
+    engine.process(observation(pointer_points(), capture_ns))
+
+    # 同一时刻 tick：手仍在交付路径上，取包延迟不构成失联。
+    engine.tick(BASE + 200_000_000)
+
+    assert engine.current_gesture.value != "lost"
+
+
 # ---------------- 进入门（测量域闸门）----------------
 
 
