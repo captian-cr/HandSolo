@@ -87,9 +87,53 @@ def test_landmarker_callback_keeps_middle_identity_well_beyond_eight_frames() ->
         detections.append,
         lambda: False,
     )
-    points = [SimpleNamespace(x=0.5, y=0.5, z=0.0) for _ in range(21)]
-    points[8] = SimpleNamespace(x=30 / 120, y=40 / 80, z=0.0)
-    points[12] = SimpleNamespace(x=90 / 120, y=40 / 80, z=0.0)
+    # 构造一个几何上合理的手骨架（所有 21 个点不能堆在同一处，否则
+    # 会被 _is_plausible_hand 过滤掉）。
+    # 手腕在下方，指关节向上扇形展开。
+    wrist = SimpleNamespace(x=0.50, y=0.80, z=0.0)
+    index_mcp = SimpleNamespace(x=0.40, y=0.62, z=0.0)
+    index_pip = SimpleNamespace(x=0.38, y=0.48, z=0.0)
+    index_dip = SimpleNamespace(x=0.36, y=0.38, z=0.0)
+    index_tip = SimpleNamespace(x=30 / 120, y=40 / 80, z=0.0)  # 保留测试原意
+    middle_mcp = SimpleNamespace(x=0.50, y=0.60, z=0.0)
+    middle_pip = SimpleNamespace(x=0.50, y=0.45, z=0.0)
+    middle_dip = SimpleNamespace(x=0.50, y=0.35, z=0.0)
+    middle_tip = SimpleNamespace(x=90 / 120, y=40 / 80, z=0.0)  # 保留测试原意
+    ring_mcp = SimpleNamespace(x=0.60, y=0.62, z=0.0)
+    ring_pip = SimpleNamespace(x=0.62, y=0.50, z=0.0)
+    ring_dip = SimpleNamespace(x=0.63, y=0.40, z=0.0)
+    ring_tip = SimpleNamespace(x=0.63, y=0.32, z=0.0)
+    pinky_mcp = SimpleNamespace(x=0.70, y=0.66, z=0.0)
+    pinky_pip = SimpleNamespace(x=0.73, y=0.56, z=0.0)
+    pinky_dip = SimpleNamespace(x=0.75, y=0.48, z=0.0)
+    pinky_tip = SimpleNamespace(x=0.76, y=0.42, z=0.0)
+    thumb_cmc = SimpleNamespace(x=0.30, y=0.68, z=0.0)
+    thumb_mcp = SimpleNamespace(x=0.25, y=0.58, z=0.0)
+    thumb_ip = SimpleNamespace(x=0.22, y=0.50, z=0.0)
+    thumb_tip = SimpleNamespace(x=0.20, y=0.44, z=0.0)
+    points = [
+        wrist,           # 0
+        thumb_cmc,       # 1
+        thumb_mcp,       # 2
+        thumb_ip,        # 3
+        thumb_tip,       # 4
+        index_mcp,       # 5
+        index_pip,       # 6
+        index_dip,       # 7
+        index_tip,       # 8
+        middle_mcp,      # 9
+        middle_pip,      # 10
+        middle_dip,      # 11
+        middle_tip,      # 12
+        ring_mcp,        # 13
+        ring_pip,        # 14
+        ring_dip,        # 15
+        ring_tip,        # 16
+        pinky_mcp,       # 17
+        pinky_pip,       # 18
+        pinky_dip,       # 19
+        pinky_tip,       # 20
+    ]
     category = SimpleNamespace(category_name="Right", score=0.98)
     full_result = SimpleNamespace(
         hand_landmarks=[points],

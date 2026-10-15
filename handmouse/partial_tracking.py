@@ -105,7 +105,7 @@ class PartialFingerTracker:
             current_gray,
             self._points,
             None,
-            winSize=(21, 21),
+            winSize=(31, 31),
             maxLevel=3,
             criteria=criteria,
         )
@@ -117,7 +117,7 @@ class PartialFingerTracker:
             self._previous_gray,
             next_points,
             None,
-            winSize=(21, 21),
+            winSize=(31, 31),
             maxLevel=3,
             criteria=criteria,
         )

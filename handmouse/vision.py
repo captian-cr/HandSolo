@@ -51,6 +51,31 @@ from handmouse.latest_slot import LatestSlot
 from handmouse.partial_tracking import PartialFingerTracker
 
 
+def _hand_bbox(points) -> tuple[float, float, float, float]:
+    """从 21 个手部关键点计算归一化 bbox (x_min, y_min, x_max, y_max)。"""
+
+    xs = [p.x for p in points[:21]]
+    ys = [p.y for p in points[:21]]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bbox_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """两个归一化 bbox 的 IoU。"""
+
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -306,9 +331,22 @@ class HandLandmarkerWorker(threading.Thread):
         self._last_timestamp_ms = 0
         self._partial_tracker = PartialFingerTracker(
             max_frames=self.config.partial_tracking_frames,
+            max_forward_backward_error=2.5,
+            max_lk_error=80.0,
+            max_step_ratio=0.28,
         )
         self._last_handedness = ""
         self._last_handedness_score = 0.0
+        # OpenCV Haar Cascade 脸检测器：用于挡掉 MediaPipe 把脸误判为手的情况。
+        # 轻量、不需要额外模型文件，与 zoom 后的识别帧同坐标系。
+        # 同时检测正面脸和侧脸，union 结果覆盖各种转头角度。
+        cascade_dir = cv2.data.haarcascades
+        self._face_cascades = [
+            cv2.CascadeClassifier(os.path.join(cascade_dir, "haarcascade_frontalface_alt2.xml")),
+            cv2.CascadeClassifier(os.path.join(cascade_dir, "haarcascade_profileface.xml")),
+        ]
+        self._face_cache: tuple[list[tuple[float, float, float, float]], int] = ([], 0)
+        self._FACE_CACHE_NS = 500_000_000  # 500ms 内复用上次脸检测结果
 
     def _callback(
         self,
@@ -331,12 +369,57 @@ class HandLandmarkerWorker(threading.Thread):
         observations: list[HandObservation] = []
         output_frame = np.ascontiguousarray(_output_image.numpy_view())
 
+        # 脸检测：如果有手检测结果才跑，带 500ms 缓存（脸不会跑得那么快）。
+        # 坐标系与 HandLandmarker 一致（zoom 后的归一化坐标）。
+        face_bboxes_norm: list[tuple[float, float, float, float]] = []
+        if result.hand_landmarks:
+            cached_faces, cached_ns = self._face_cache
+            if callback_ns - cached_ns < self._FACE_CACHE_NS and cached_faces:
+                face_bboxes_norm = cached_faces
+            else:
+                gray = cv2.cvtColor(output_frame, cv2.COLOR_BGR2GRAY)
+                h, w = output_frame.shape[:2]
+                all_faces: list[tuple[int, int, int, int]] = []
+                for cascade in self._face_cascades:
+                    try:
+                        faces = cascade.detectMultiScale(
+                            gray, scaleFactor=1.2, minNeighbors=4, minSize=(30, 30),
+                        )
+                    except Exception:
+                        faces = ()
+                    all_faces.extend(faces)
+                face_bboxes_norm = [
+                    (fx / w, fy / h, (fx + fw) / w, (fy + fh) / h)
+                    for (fx, fy, fw, fh) in all_faces
+                ]
+                self._face_cache = (face_bboxes_norm, callback_ns)
+
         for index, hand_points in enumerate(result.hand_landmarks):
             categories = result.handedness[index] if index < len(result.handedness) else []
             category = categories[0] if categories else None
             handedness = category.category_name if category else ""
             handedness_score = float(category.score) if category else 0.0
-            if index == 0:
+
+            # 脸 bbox overlap 过滤：先用 HandLandmarker 原始坐标（zoom 后）
+            # 算 bbox，和 Haar Cascade 的脸 bbox 比 IoU。重叠 > 30% 就丢弃。
+            if len(hand_points) == 21 and face_bboxes_norm:
+                hand_bbox = _hand_bbox(hand_points)
+                max_iou = max((_bbox_iou(hand_bbox, fb) for fb in face_bboxes_norm), default=0.0)
+                if max_iou > 0.30:
+                    LOGGER.info(
+                        "[脸过滤] 丢弃疑似误检 IoU=%.2f handedness=%s score=%.2f",
+                        max_iou, handedness, handedness_score,
+                    )
+                    continue
+
+            points = tuple(
+                transform.restore(
+                    Landmark(float(point.x), float(point.y), float(point.z)),
+                )
+                for point in hand_points
+            )
+            # 通过脸过滤后才更新 handedness 和 seed 续跟踪器，避免假阳性污染状态。
+            if len(observations) == 0:
                 self._last_handedness = handedness
                 self._last_handedness_score = handedness_score
                 if self.config.partial_finger_tracking and len(hand_points) == 21:
@@ -353,12 +436,6 @@ class HandLandmarkerWorker(threading.Thread):
                             ),
                         },
                     )
-            points = tuple(
-                transform.restore(
-                    Landmark(float(point.x), float(point.y), float(point.z)),
-                )
-                for point in hand_points
-            )
             observations.append(
                 HandObservation(
                     landmarks=points,
