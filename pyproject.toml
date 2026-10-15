@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "handmouse"
+version = "0.7.0"
+description = "视觉手势鼠标：MediaPipe 手部关键点 → Windows SendInput（引擎层移植自 Vimoose，MIT）"
+requires-python = ">=3.10"
+
+# 刻意留空：引擎层依赖全部下挂在 core extra，避免"装包体即拖进重依赖"。
+# 可用安装请用 `pip install -e ".[core]"`，完整功能用 `".[all]"`。
+dependencies = []
+
+[project.optional-dependencies]
+# 基础引擎层：摄像头采集 + 手部关键点 + 光标注入的全部运行时依赖。
+# 注意：mediapipe 的 wheel 元数据硬依赖 opencv-contrib-python（实测 0.10.21
+# 会自动装上 4.11.x 的 contrib 版），所以这里不再单独 pin opencv-python，
+# 否则两个发行版同时提供 cv2 会互相覆盖。桌面预览用的就是这一份 OpenCV。
+core = [
+  "mediapipe>=0.10.14,<0.11",
+  "numpy>=1.24,<2.0",
+]
+# 控件磁吸/找按钮。uiautomation 与 comtypes 二选一，不要同时装。
+# 只在低频 worker 里查询（5–10Hz 并带缓存），不进 30–60fps 主循环。
+uia = ["uiautomation>=2.0.29"]
+# 托盘与设置面板：MVP 未实现，先占位（配置走 config.json + CLI flags）。
+ui = ["PySide6>=6.6"]
+# CPU/内存读数，缺失时流水线自动跳过采样。
+metrics = ["psutil>=5.9"]
+all = [
+  "mediapipe>=0.10.14,<0.11",
+  "numpy>=1.24,<2.0",
+  "uiautomation>=2.0.29",
+  "PySide6>=6.6",
+  "psutil>=5.9",
+]
+
+[project.scripts]
+handmouse = "handmouse.app:main"
+
+[tool.setuptools]
+packages = ["handmouse"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# 手部关键点模型随包分发，避免运行时再去下载。
+handmouse = ["models/*.task", "LICENSE.vimoose"]

@@ -1,0 +1,56 @@
+# requirements.lock —— handmouse `core` extra 的冻结闭包（全量精确 pin）
+#
+# 这是什么：
+#   `core` extra（mediapipe + numpy）在 Windows / CPython 3.12 上解析出的
+#   完整安装闭包。装 core 时 pip 真正会落到磁盘上的包，就是下面这一串，
+#   版本号全部锁死，用于复现构建 / 离线打包校验。
+#
+# 三条硬约束（不要删改）：
+#   1. 必须同时包含 mediapipe、numpy，以及被 mediapipe wheel 元数据
+#      **被动带入**的 opencv-contrib-python，且三者的版本一起冻结。
+#   2. 工程内禁止再出现 opencv-python / opencv-python-headless ——
+#      任何第二个提供 cv2 的发行版都会和 opencv-contrib-python 互相覆盖，
+#      导致桌面预览用的这份 OpenCV 被换掉。
+#   3. uiautomation / PySide6 / psutil / pyinstaller / pytest 分别属于
+#      uia、ui、metrics extra 或开发依赖，**不出现在本文件里**，
+#      按需单独安装。
+#
+# 生成方式：
+#   pip install --dry-run --ignore-installed --report - \
+#       "mediapipe==0.10.21" "numpy==1.26.4"
+#   （pip 24.3.1；--ignore-installed 是为了在已装好这些包的 venv 里
+#     也能强制走完整解析，否则 install 数组会因“已满足”而为空）
+#
+# 排序：下面三行是 core 的真身，放最前（关系见各自的注释）；
+#       其余传递依赖按包名字母序排列。
+
+# core 的直接依赖：
+mediapipe==0.10.21
+numpy==1.26.4
+# mediapipe wheel 的硬依赖，pip 自动带入，不可移除（见上方约束 2）：
+opencv-contrib-python==4.11.0.86
+
+# ---- 以下为传递依赖（字母序）----
+absl-py==2.5.1
+attrs==26.1.0
+cffi==2.1.1
+contourpy==1.3.3
+cycler==0.12.1
+flatbuffers==25.12.19
+fonttools==4.67.0
+jax==0.7.1
+jaxlib==0.7.1
+kiwisolver==1.5.1
+matplotlib==3.11.2
+ml_dtypes==0.5.4
+opt_einsum==3.4.0
+packaging==26.3
+pillow==12.3.0
+protobuf==4.25.9
+pycparser==3.11
+pyparsing==3.3.3
+python-dateutil==2.9.0.post0
+scipy==1.17.1
+sentencepiece==0.2.2
+six==1.17.0
+sounddevice==0.5.6

@@ -1,0 +1,12 @@
+# 引擎层（core）最小依赖：够跑 `python -m handmouse --safe-mode`。
+#
+# 关于 opencv：mediapipe 的 wheel 元数据硬依赖 opencv-contrib-python，
+# pip 会自动装上它，所以这里**不要**再写 opencv-python，否则两个发行版
+# 同时提供 cv2 会互相覆盖。桌面预览用的就是 mediapipe 带来的这一份。
+mediapipe>=0.10.14,<0.11
+numpy>=1.24,<2.0
+
+# 可选依赖（按需单独安装，别一次性全上）：
+#   uiautomation>=2.0.29   # 控件磁吸/找按钮，与 comtypes 二选一
+#   psutil>=5.9            # 调试窗口里的 CPU/内存读数
+#   PySide6>=6.6           # 托盘/设置面板，MVP 阶段不需要
