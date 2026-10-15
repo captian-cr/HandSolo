@@ -176,9 +176,15 @@ def build_view(
     return view
 
 
+# 摄像头打不开时主循环一帧都没显示过，窗口并不存在；此时无条件调用
+# cvDestroyWindow 会抛 "NULL window"。用一个标志记住窗口是否真的建过。
+_window_opened = False
+
+
 def present(window_name: str, frame: np.ndarray, scale: float) -> int:
     """按 DPI 缩放后显示，并返回按键码（无按键返回 -1）。"""
 
+    global _window_opened
     shown = frame
     if scale > 1.01:
         shown = cv2.resize(
@@ -189,9 +195,14 @@ def present(window_name: str, frame: np.ndarray, scale: float) -> int:
             interpolation=cv2.INTER_LINEAR,
         )
     cv2.imshow(window_name, shown)
+    _window_opened = True
     return cv2.waitKey(1) & 0xFF
 
 
 def close(window_name: str = WINDOW_NAME) -> None:
+    global _window_opened
+    if not _window_opened:
+        return
+    _window_opened = False
     cv2.destroyWindow(window_name)
     cv2.waitKey(1)
