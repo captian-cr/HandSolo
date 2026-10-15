@@ -81,7 +81,8 @@ python -m handmouse --diagnostic-seconds 20   # 跑 20 秒后打印指标退出
 | 手势 | 效果 |
 |---|---|
 | 食指伸出 | 光标移动（One Euro 滤波 + 插值，`pointer_*` 参数） |
-| 捏合（拇指-食指靠近） | `PINCH_ARMED` 锁定落点 → 松开触发左键点击 |
+| 捏合（拇指-食指靠近） | `PINCH_ARMED` 锁定落点 → 松开触发左键点击（单击延迟 `double_click_window_ms` 提交） |
+| 捏合两下（窗口内、同位置） | 左键双击，打开/启动（第一次捏合绝不提前单击） |
 | 捏合后保持 | 左键按住拖拽（`drag_hold_ms`） |
 | 握拳保持 | 冻结：松开左键并切换暂停（应急用，`fist_hold_ms`，再握一次恢复） |
 | 张开手掌 | 滚轮模式（上下移动手掌滚动） |
@@ -115,6 +116,7 @@ python -m handmouse --diagnostic-seconds 20   # 跑 20 秒后打印指标退出
 | `pointer_margin_x` / `pointer_margin_y` | 0.2 / 0.16 | 画面边缘不映射到屏幕边缘 |
 | `pinch_engage` / `pinch_release` / `pinch_arm` | 0.42 / 0.55 / 0.72 | 捏合触发 / 松开 / 预锁阈值（手部宽度归一） |
 | `drag_hold_ms` / `fist_hold_ms` | 5000 / 500 | 拖拽与握拳冻结的判定时长 |
+| `double_click_window_ms` / `double_click_max_drift` | 350 / 0.05 | 双击窗口（ms，单击延迟同值）与两次捏合落点容差（归一化画面坐标） |
 | `cursor_snap_enabled` / `cursor_snap_radius_px` | true / 30 | 控件磁吸开关与半径（需 `uia` extra） |
 | `multi_monitor` / `virtual_desk_experimental` | false / false | 多屏映射 / 单屏实验开关 |
 

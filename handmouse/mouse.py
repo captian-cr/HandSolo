@@ -39,6 +39,8 @@ class MouseBackend(Protocol):
 
     def left_click(self) -> None: ...
 
+    def left_double_click(self) -> None: ...
+
     def wheel(self, delta: int) -> None: ...
 
     def page_next(self) -> None: ...
@@ -214,6 +216,15 @@ class Win32MouseBackend:
             self._send(self.LEFTUP)
             self._left_is_down = False
 
+    def left_double_click(self) -> None:
+        # 两对 down/up 背靠背发出，间隔远小于系统双击时间，等价双击图标。
+        with self._lock:
+            self._send(self.LEFTDOWN)
+            self._send(self.LEFTUP)
+            self._send(self.LEFTDOWN)
+            self._send(self.LEFTUP)
+            self._left_is_down = False
+
     def right_click(self) -> None:
         with self._lock:
             self._send(self.RIGHTDOWN)
@@ -282,6 +293,9 @@ class NullMouseBackend:
     def left_click(self) -> None:
         self._record("left_click")
 
+    def left_double_click(self) -> None:
+        self._record("left_double_click")
+
     def right_click(self) -> None:
         self._record("right_click")
 
@@ -322,6 +336,8 @@ class MouseController:
                     self.backend.move(command.x, command.y)
             elif command.kind == MouseCommandType.LEFT_CLICK:
                 self.backend.left_click()
+            elif command.kind == MouseCommandType.LEFT_DOUBLE_CLICK:
+                self.backend.left_double_click()
             elif command.kind == MouseCommandType.LEFT_DOWN:
                 self.backend.left_down()
             elif command.kind == MouseCommandType.LEFT_UP:

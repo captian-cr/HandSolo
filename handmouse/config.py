@@ -63,6 +63,12 @@ class AppConfig:
     pinch_arm: float = 0.72
     right_pinch_approach_delta: float = 0.22
     drag_hold_ms: int = 5000
+    # 双击（捏合两下）判定窗口：第一次释放后单击延迟这么久提交，窗口内
+    # 第二次同位置捏合升级为双击。单击因此有一次窗口长度的延迟（VR 设备
+    # 的捏合确认同款取舍），宁可延迟也不能在双击前先点一下。
+    double_click_window_ms: int = 350
+    # 两次捏合落点的最大间距（归一化画面坐标）：超过则按两次独立单击。
+    double_click_max_drift: float = 0.05
     fist_hold_ms: int = 500
     hand_lost_ms: int = 200
     scroll_threshold: float = 0.12
@@ -125,6 +131,12 @@ class AppConfig:
             min(0.60, float(self.right_pinch_approach_delta)),
         )
         self.drag_hold_ms = max(300, min(10_000, int(self.drag_hold_ms)))
+        self.double_click_window_ms = max(
+            100, min(1000, int(self.double_click_window_ms)),
+        )
+        self.double_click_max_drift = max(
+            0.01, min(0.5, float(self.double_click_max_drift)),
+        )
         self.fist_hold_ms = max(300, min(1500, int(self.fist_hold_ms)))
         self.hand_lost_ms = max(100, min(1000, int(self.hand_lost_ms)))
         self.scroll_threshold = max(0.03, min(0.6, float(self.scroll_threshold)))

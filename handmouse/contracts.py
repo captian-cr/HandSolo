@@ -107,6 +107,7 @@ class MouseCommandType(str, Enum):
 
     MOVE = "move"
     LEFT_CLICK = "left_click"
+    LEFT_DOUBLE_CLICK = "left_double_click"
     LEFT_DOWN = "left_down"
     LEFT_UP = "left_up"
     RIGHT_CLICK = "right_click"

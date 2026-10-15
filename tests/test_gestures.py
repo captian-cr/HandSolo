@@ -81,9 +81,16 @@ def test_pinch_ignores_unstable_depth_coordinate() -> None:
     engine = GestureEngine(AppConfig())
 
     assert engine.process(observation(tuple(points), BASE)) == []
-    commands = engine.process(observation(pointer_points(), BASE + 120_000_000))
+    # 第一次释放只挂起双击窗口，窗口内不提交单击。
+    assert engine.process(
+        observation(pointer_points(), BASE + 120_000_000),
+    ) == []
+    # 窗口到期后的下一帧补提交单击。
+    commands = engine.process(
+        observation(pointer_points(), BASE + 500_000_000),
+    )
 
-    assert kinds(commands) == [MouseCommandType.LEFT_CLICK]
+    assert kinds(commands) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
 
 
 def test_pointer_extension_ignores_unstable_depth_coordinate() -> None:
@@ -96,15 +103,23 @@ def test_pointer_extension_ignores_unstable_depth_coordinate() -> None:
     assert kinds(commands) == [MouseCommandType.MOVE]
 
 
-def test_short_left_pinch_clicks_only_after_release() -> None:
+def test_short_left_pinch_clicks_only_after_release_window() -> None:
+    """短捏合释放后单击延迟一个双击窗口提交（VR 捏合同款取舍）。"""
+
     engine = GestureEngine(AppConfig())
     assert engine.process(observation(left_pinch_points(), BASE)) == []
 
-    commands = engine.process(
+    # 释放瞬间不点击：挂起窗口，等可能到来的第二次捏合。
+    assert engine.process(
         observation(pointer_points(), BASE + 200_000_000),
+    ) == []
+
+    # 窗口到期后的后续帧补提交单击。
+    commands = engine.process(
+        observation(pointer_points(), BASE + 600_000_000),
     )
 
-    assert kinds(commands) == [MouseCommandType.LEFT_CLICK]
+    assert kinds(commands) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
 
 
 def test_fist_like_left_pinch_has_priority_over_pause_confirmation() -> None:
@@ -122,7 +137,13 @@ def test_fist_like_left_pinch_has_priority_over_pause_confirmation() -> None:
     assert started == []
     assert held == []
     assert engine.paused is False
-    assert kinds(released) == [MouseCommandType.LEFT_CLICK]
+    assert released == []
+    # 挂起的单击在双击窗口到期后补提交。
+    flushed = engine.process(
+        observation(pointer_points(), BASE + 1_200_000_000),
+    )
+    assert engine.paused is False
+    assert kinds(flushed) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
 
 
 def test_default_drag_requires_five_seconds_of_continuous_pinch() -> None:
@@ -657,3 +678,115 @@ def test_fist_during_click_or_drag_does_not_exit_gate() -> None:
     engine.process(observation(fist_points(), BASE + 2_000_000_000))
 
     assert engine.current_gesture.value != "gate_idle"
+
+
+# ---------------- 双击（捏合两下，硬线 H6'）----------------
+
+
+def test_double_pinch_fires_double_click_without_early_single() -> None:
+    """硬线 H6'：窗口内同位置捏合两下 → 双击，第一次捏合不得提前提交单击。"""
+
+    engine = GestureEngine(AppConfig())
+    # 第一次捏合：无任何指令。
+    assert engine.process(observation(left_pinch_points(), BASE)) == []
+    # 第一次释放：单击挂起，窗口内不落地（这是 H6' 的核心）。
+    assert engine.process(
+        observation(pointer_points(), BASE + 100_000_000),
+    ) == []
+    # 第二次捏合（中间已完全释放：_left_active 只在越过 pinch_release
+    # 阈值后才会清除），仍不得提前出单击。
+    assert engine.process(
+        observation(left_pinch_points(), BASE + 200_000_000),
+    ) == []
+
+    commands = engine.process(
+        observation(pointer_points(), BASE + 300_000_000),
+    )
+
+    assert kinds(commands) == [MouseCommandType.LEFT_DOUBLE_CLICK]
+
+
+def test_second_pinch_outside_window_becomes_two_single_clicks() -> None:
+    """超过双击窗口后的第二次捏合按两次独立单击处理。"""
+
+    engine = GestureEngine(AppConfig())
+    engine.process(observation(left_pinch_points(), BASE))
+    assert engine.process(
+        observation(pointer_points(), BASE + 100_000_000),
+    ) == []
+    # 窗口到期帧：补提交第一次单击。
+    first = engine.process(
+        observation(pointer_points(), BASE + 500_000_000),
+    )
+    assert kinds(first) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
+
+    # 此后再来一次捏合：是全新的一轮，释放后只挂起单击。
+    assert engine.process(
+        observation(left_pinch_points(), BASE + 600_000_000),
+    ) == []
+    assert engine.process(
+        observation(pointer_points(), BASE + 700_000_000),
+    ) == []
+    second = engine.process(
+        observation(pointer_points(), BASE + 1_100_000_000),
+    )
+    assert kinds(second) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
+
+
+def test_second_pinch_with_large_drift_becomes_two_single_clicks() -> None:
+    """两次捏合落点相差超过容差：不算双击，第一次立即补提交。"""
+
+    drifted = translate_points(left_pinch_points(), dx=0.20)
+    engine = GestureEngine(AppConfig())
+    engine.process(observation(left_pinch_points(), BASE))
+    engine.process(observation(pointer_points(), BASE + 100_000_000))
+
+    # 第二次捏合位置远离第一次：本次捏合瞬间补发第一次单击。
+    reengage = engine.process(observation(drifted, BASE + 200_000_000))
+    assert kinds(reengage) == [MouseCommandType.LEFT_CLICK]
+
+    # 第二次释放只挂起自己的单击，窗口到期后补提交，全程无双击。
+    assert engine.process(
+        observation(translate_points(pointer_points(), dx=0.20),
+                    BASE + 300_000_000),
+    ) == []
+    flushed = engine.process(
+        observation(translate_points(pointer_points(), dx=0.20),
+                    BASE + 700_000_000),
+    )
+    assert kinds(flushed) == [MouseCommandType.LEFT_CLICK, MouseCommandType.MOVE]
+
+
+def test_second_pinch_held_too_long_becomes_single_click_then_drag() -> None:
+    """双击的第二次捏合被按住越过拖拽阈值：双击不成立，先补单击再拖拽。"""
+
+    engine = GestureEngine(AppConfig(drag_hold_ms=300))
+    engine.process(observation(left_pinch_points(), BASE))
+    engine.process(observation(pointer_points(), BASE + 100_000_000))
+    engine.process(observation(left_pinch_points(), BASE + 200_000_000))
+
+    held = engine.process(
+        observation(left_pinch_points(), BASE + 560_000_000),
+    )
+
+    assert kinds(held) == [
+        MouseCommandType.LEFT_CLICK,
+        MouseCommandType.LEFT_DOWN,
+        MouseCommandType.MOVE,
+    ]
+
+
+def test_pending_single_click_flushes_when_hand_lost() -> None:
+    """挂起窗口内手离画：失联时把挂起的单击兑现，点击不得凭空消失。"""
+
+    config = AppConfig(hand_lost_ms=200)
+    engine = GestureEngine(config)
+    engine.process(observation(left_pinch_points(), BASE))
+    assert engine.process(
+        observation(pointer_points(), BASE + 100_000_000),
+    ) == []
+
+    lost = engine.tick(BASE + 400_000_000)
+
+    assert kinds(lost) == [MouseCommandType.LEFT_CLICK]
+    assert engine.current_gesture.value == "lost"

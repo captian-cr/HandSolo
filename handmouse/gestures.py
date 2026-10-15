@@ -229,6 +229,21 @@ class GestureEngine:
         self._page_swipe_latched = False
         self._lost_reported = False
         self._left_button_down = False
+        # 双击（捏合两下）子状态，不占顶层 ControlState：
+        # 第一次短捏合释放后不立即提交单击，挂起一个双击窗口；窗口内第二次
+        # 同位置捏合（中间必须完全释放过）升级为 LEFT_DOUBLE_CLICK，窗口
+        # 到期则由下一帧/tick() 补提交单击。
+        self._click_pending = False
+        self._click_pending_ns: int | None = None
+        self._click_pending_x: float | None = None
+        self._click_pending_y: float | None = None
+        # 第二次捏合已确认、正在等待其释放（释放瞬间发双击）。
+        self._double_armed = False
+        # 本次捏合发生时的食指尖位置（归一化画面坐标），双击容差判定用。
+        self._left_pinch_x: float | None = None
+        self._left_pinch_y: float | None = None
+        # 因双击窗口到期而提前生成的单击，随当前帧的命令一起交付。
+        self._due_commands: list[MouseCommand] = []
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -238,19 +253,21 @@ class GestureEngine:
             self._gate_active = True
             self._entry_started_ns = None
 
-    def _exit_gate(self) -> None:
+    def _exit_gate(self, timestamp_ns: int) -> list[MouseCommand]:
         """握拳退出控制态：闸门回到未开。
 
         退出后手必须重新做进入姿势（掌心朝镜+五指张开 300ms）才能再控制，
         这样一次幻影握拳最多只是把闸门关上，不会连锁触发下游动作。
         """
 
+        commands = self._flush_click_pending(timestamp_ns)
         self._gate_active = False
         self._entry_started_ns = None
         self._reset_transient()
         self.filter.reset()
         self.state = ControlState.IDLE
         self.current_gesture = GestureType.GATE_IDLE
+        return commands
 
     @staticmethod
     def _build_pointer_filter(config: AppConfig) -> OneEuroPointerFilter:
@@ -289,6 +306,44 @@ class GestureEngine:
         self._left_button_down = False
         return [self._command(MouseCommandType.LEFT_UP, timestamp_ns)]
 
+    def _expire_click_pending(self, now_ns: int) -> None:
+        """双击窗口到期：把挂起的单击补提交（进入 ``_due_commands``）。
+
+        延迟提交单击是双击判定的必要代价：想双击时第一次点击绝不能提前
+        落地（否则图标先被选中/启动一次）。
+        """
+
+        if (
+            self._click_pending
+            and self._click_pending_ns is not None
+            and now_ns - self._click_pending_ns
+            >= self.config.double_click_window_ms * 1_000_000
+        ):
+            self._due_commands.append(
+                self._command(MouseCommandType.LEFT_CLICK, now_ns),
+            )
+            self._click_pending = False
+            self._click_pending_ns = None
+            self._click_pending_x = None
+            self._click_pending_y = None
+
+    def _flush_click_pending(self, timestamp_ns: int) -> list[MouseCommand]:
+        """终止时刻（暂停/退出门/失联）立即兑现挂起的单击。
+
+        双击已不可能再完成：被暂缓的第一次点击（含第二次捏合已经发生的
+        情形，等价真实鼠标"点一下后改按住拖动"）按单击补提交。
+        """
+
+        commands: list[MouseCommand] = []
+        if self._click_pending or self._double_armed:
+            commands.append(self._command(MouseCommandType.LEFT_CLICK, timestamp_ns))
+        self._click_pending = False
+        self._click_pending_ns = None
+        self._click_pending_x = None
+        self._click_pending_y = None
+        self._double_armed = False
+        return commands
+
     def _reset_transient(self) -> None:
         self._left_active = False
         self._left_started_ns = None
@@ -324,6 +379,7 @@ class GestureEngine:
 
         now = timestamp_ns or monotonic_ns()
         commands = self._release_left(now)
+        commands.extend(self._flush_click_pending(now))
         self.paused = paused
         self.state = ControlState.PAUSED if paused else ControlState.IDLE
         self.current_gesture = GestureType.PAUSED if paused else GestureType.NONE
@@ -340,6 +396,15 @@ class GestureEngine:
         return self.set_paused(True, timestamp_ns)
 
     def process(self, observation: HandObservation) -> list[MouseCommand]:
+        """处理一帧有效手部观测，并顺带交付双击窗口到期补提交的单击。"""
+
+        commands = self._process_observation(observation)
+        if self._due_commands:
+            commands = [*self._due_commands, *commands]
+            self._due_commands = []
+        return commands
+
+    def _process_observation(self, observation: HandObservation) -> list[MouseCommand]:
         """处理一帧有效手部观测。"""
 
         # 到达时刻戳：本帧交付到控制线程的墙钟时刻。tick() 的失联判定用的是
@@ -507,6 +572,7 @@ class GestureEngine:
 
         if observation.partial_finger and observation.partial_position is not None:
             commands = self._release_left(now)
+            self._expire_click_pending(now)
             self._reset_transient()
             self.last_hand_ns = arrival_ns
             self._lost_reported = False
@@ -528,6 +594,9 @@ class GestureEngine:
 
         self.last_hand_ns = arrival_ns
         self._lost_reported = False
+        # 双击窗口按观测时间到期：手一直在画面里时，到期的单击由本帧顺带
+        # 交付（进 _due_commands，由 process() 包装层拼到本帧命令前面）。
+        self._expire_click_pending(now)
         width = _palm_width(points)
         left_ratio = _distance_2d(points[4], points[8]) / width
         right_ratio = _distance_2d(points[4], points[12]) / width
@@ -654,11 +723,12 @@ class GestureEngine:
                     if held_ms >= self.config.fist_hold_ms:
                         commands = self._release_left(now)
                         self._fist_started_ns = None
-                        self._exit_gate()
+                        commands.extend(self._exit_gate(now))
                         return commands
                 return []
             # 进入门未启用：保留"握拳切换暂停"的旧语义。
             commands = self._release_left(now)
+            commands.extend(self._flush_click_pending(now))
             self._reset_transient()
             self.current_gesture = GestureType.FIST
             if self._fist_started_ns is None:
@@ -716,8 +786,23 @@ class GestureEngine:
                 if self._left_button_down:
                     commands.extend(self._release_left(now))
                 elif self._left_started_ns is not None:
-                    commands.append(self._command(MouseCommandType.LEFT_CLICK, now))
+                    if self._double_armed:
+                        # 第二次捏合释放：双击成立。第一次点击从未落地，
+                        # 因此不会出现"先单击一次再双击"的三连击。
+                        commands.append(
+                            self._command(MouseCommandType.LEFT_DOUBLE_CLICK, now),
+                        )
+                        self._double_armed = False
+                    else:
+                        # 短捏合不立即发单击：挂起双击窗口，等窗口内是否
+                        # 还有第二次同位置捏合；到期由帧/tick 补提交。
+                        self._click_pending = True
+                        self._click_pending_ns = now
+                        self._click_pending_x = self._left_pinch_x
+                        self._click_pending_y = self._left_pinch_y
                 self._left_started_ns = None
+                self._left_pinch_x = None
+                self._left_pinch_y = None
                 self.state = ControlState.IDLE
                 return commands
             self.current_gesture = (
@@ -727,6 +812,12 @@ class GestureEngine:
             if self._left_started_ns is not None:
                 held_ms = (now - self._left_started_ns) / 1_000_000
                 if held_ms >= self.config.drag_hold_ms and not self._left_button_down:
+                    if self._double_armed:
+                        # 第二次捏合被按住超过拖拽阈值：双击不成立。先补发
+                        # 第一次单击，再按下左键进入拖拽（等价真实鼠标
+                        # "点一下后按住拖动"），避免第一次点击凭空消失。
+                        commands.append(self._command(MouseCommandType.LEFT_CLICK, now))
+                        self._double_armed = False
                     commands.append(self._command(MouseCommandType.LEFT_DOWN, now))
                     self._left_button_down = True
                     self.state = ControlState.DRAGGING
@@ -758,6 +849,31 @@ class GestureEngine:
             self._reset_orientation_tracking()
             self._left_active = True
             self._left_started_ns = now
+            self._left_pinch_x = points[8].x
+            self._left_pinch_y = points[8].y
+            # 双击判定：上一次短捏合挂起的窗口仍在，且本次捏合与其落点
+            # 间距在容差内 → 暂存"双击候选"，等本次释放时发双击。
+            # 两次捏合之间必然完全释放过（能走到这里 _left_active 必为
+            # False，而它只在 pinch_ratio 回到 pinch_release 以上时清除）。
+            if self._click_pending and self._click_pending_ns is not None:
+                within_window = (
+                    (now - self._click_pending_ns) / 1_000_000
+                    <= self.config.double_click_window_ms
+                )
+                drift = hypot(
+                    points[8].x - (self._click_pending_x or points[8].x),
+                    points[8].y - (self._click_pending_y or points[8].y),
+                )
+                if within_window and drift <= self.config.double_click_max_drift:
+                    self._double_armed = True
+                    self._click_pending = False
+                    self._click_pending_ns = None
+                    self._click_pending_x = None
+                    self._click_pending_y = None
+                else:
+                    # 窗口超时（正常已被到期逻辑清掉）或两次落点相距太远：
+                    # 第一次按独立单击立即补提交，本次捏合另起一轮。
+                    self._due_commands.extend(self._flush_click_pending(now))
             self.state = ControlState.PINCH_PENDING
             return []
 
@@ -873,13 +989,22 @@ class GestureEngine:
         """检查手部数据超时并执行失联保护。"""
 
         now = timestamp_ns or monotonic_ns()
+        # 控制线程每 ~8ms 调一次 tick：即使没有新观测帧，挂起单击的双击
+        # 窗口也能在这里按时到期，单击延迟被严格钳在一个窗口长度。
+        self._expire_click_pending(now)
+        due = self._due_commands
+        self._due_commands = []
         if self.last_hand_ns is None:
-            return []
+            return list(due)
         elapsed_ms = (now - self.last_hand_ns) / 1_000_000
         if elapsed_ms < self.config.hand_lost_ms or self._lost_reported:
-            return []
+            return list(due)
 
-        commands = self._release_left(now)
+        commands = list(due)
+        # 手已离画：挂起的双击等不到第二次捏合了，按单击兑现，避免一次
+        # 正常点击因为手随后出画而凭空消失。
+        commands.extend(self._flush_click_pending(now))
+        commands.extend(self._release_left(now))
         self._reset_transient()
         self.filter.reset()
         self.state = ControlState.LOST
