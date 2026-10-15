@@ -69,7 +69,7 @@ def test_attach_event_trigger_matches_tags(tmp_path) -> None:
         logger.info("[状态] none(paused=False) → scroll(paused=False)")
         logger.info("[注入] left_click")
         logger.info("普通日志不触发")
-        logger.info("[轨迹] state=candidate candidates=W pending=- | 候选 W")
+        logger.info("[轨迹] state=idle candidates=- pending=- | -")
     finally:
         logger.setLevel(old_level)
         logger.removeHandler(handler)
@@ -77,7 +77,8 @@ def test_attach_event_trigger_matches_tags(tmp_path) -> None:
         pending = list(recorder._pending)
     assert sum("[状态]" in p for p in pending) == 1
     assert sum("[注入]" in p for p in pending) == 1
-    assert sum("[轨迹]" in p for p in pending) == 1
+    # [轨迹] 已从 TRIGGER_TAGS 移除（motion 模块删除），不应触发
+    assert sum("[轨迹]" in p for p in pending) == 0
     assert all("普通日志" not in p for p in pending)
 
 
