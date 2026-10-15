@@ -140,6 +140,15 @@ class MotionGestureEngine:
     def _two_finger_pose(points, pinch_ratio: float, thumb_away: float) -> bool:
         """食指+中指伸出、无名指与小指收拢、拇指不贴近食指。
 
+        ARMED 进入条件（H6 硬线判定依据）：
+        - index=True, middle=True（食指+中指伸出，关节角 ≥ 135°）
+        - ring=False, pinky=False（无名指+小指收拢）
+        - pinch_ratio > thumb_away（拇指-食指距离 > pinch_arm，默认 0.72 掌宽）
+          → 拇指必须与食指**分开**，不是捏合；捏合时 pinch_ratio < 0.72 不会进 ARMED
+        - partial_finger=None（手部关键点完整，否则 process() 直接走 tick()）
+        - drift ≤ motion_arm_max_drift（默认 0.05，食指尖原地悬停）
+        - held_ms ≥ motion_arm_hold_ms（默认 250ms）
+
         ``thumb_away`` 复用 ``pinch_arm``：比它更近就说明用户正准备捏合，
         不该理解成"要开始画画"。
         """
@@ -179,6 +188,15 @@ class MotionGestureEngine:
         pinch_ratio = _distance_2d(points[4], points[8]) / width
         tip = (float(points[8].x), float(points[8].y))
         two_finger = self._two_finger_pose(points, pinch_ratio, self.config.pinch_arm)
+        if VERBOSE_GATE:
+            index, middle, ring, pinky = _finger_extensions(points)
+            _DIAG_LOGGER.info(
+                "motion-arm two_finger=%s index=%s middle=%s ring=%s pinky=%s "
+                "pinch_ratio=%.3f pinch_arm=%.3f partial_finger=%s state=%s",
+                two_finger, index, middle, ring, pinky,
+                pinch_ratio, self.config.pinch_arm,
+                observation.partial_finger or "None", self.state.value,
+            )
 
         if self.state is MotionState.IDLE:
             return self._step_idle(now, tip, two_finger)
@@ -254,12 +272,22 @@ class MotionGestureEngine:
         drift = hypot(tip[0] - self._arm_anchor[0], tip[1] - self._arm_anchor[1])
         if drift > self.config.motion_arm_max_drift:
             # 手指在动说明用户还在控制光标，不是准备画画，重新计时。
+            if VERBOSE_GATE:
+                _DIAG_LOGGER.info(
+                    "motion-arm drift=%.4f max_drift=%.4f → reset (finger moving)",
+                    drift, self.config.motion_arm_max_drift,
+                )
             self._arm_started_ns = now
             self._arm_anchor = tip
             return _idle_outcome()
 
         held_ms = (now - self._arm_started_ns) / 1_000_000
         if held_ms < self.config.motion_arm_hold_ms:
+            if VERBOSE_GATE:
+                _DIAG_LOGGER.info(
+                    "motion-arm held_ms=%.0f hold_ms=%d → waiting",
+                    held_ms, self.config.motion_arm_hold_ms,
+                )
             return _idle_outcome()
 
         self.state = MotionState.ARMED
