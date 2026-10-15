@@ -96,6 +96,12 @@ class AppConfig:
     # 全局闸门：未进入控制态时，下游手势（捏合/翻页/拖拽）一律不执行，从根上
     # 挡住"脸被误判成手"产生的幻影动作。默认关，与 virtual_desk_experimental
     # 一样先在一轮引导基线里验证，再决定是否转正。
+    #
+    # 已知 gap（勿误读为"门是全局的"）：本闸门当前只覆盖 GestureEngine，
+    # DTW 轨迹引擎（motion_gestures）未纳入——它在 pipeline 里先于 GestureEngine
+    # 运行，输入不受闸门约束。待 r3 数据确认 DTW 在"无意图段"是否出现非 idle
+    # （r2 为 0 次）后再决定是否补纳入；r3 复盘时 DTW 的 [轨迹] 单独统计，
+    # 它出非 idle 记"DTW 未纳入门"，不记"门漏了"。
     entry_gate_enabled: bool = False
     # 进入姿势（掌心朝镜 + 五指张开）需连续保持的时间；与双指悬停同量级，
     # 不引入新的时间常数。退出复用既有常数：握拳退出沿用 fist_hold_ms，
