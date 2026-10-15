@@ -198,6 +198,10 @@ class GestureEngine:
         # 诊断用：进入门几何判定层的帧计数和去重缓存
         self._gate_diag_frame = 0
         self._gate_diag_last_sig: tuple | None = None
+        # 诊断用：gate_eligible 的逐帧翻转计数（False→True）。用于把"lost 路径
+        # 清零"与"姿势判定在门槛附近翻动导致清零"分开归因。
+        self._gate_diag_prev_eligible = False
+        self._gate_diag_eligible_flips = 0
         # 诊断用：最近一次观测被 process() 消费的墙钟时刻（到达时刻戳）。
         # 与 last_hand_ns（采集时刻戳）配对，可把 tick() 的 elapsed 拆成
         # "取包延迟"(arrival-last_hand_ns) 与 "消费后空转"(now-arrival) 两段。
@@ -397,6 +401,11 @@ class GestureEngine:
 
                 gate_eligible = (not self._gate_active) and five_open and palm_presented
                 held_ms = (now - self._entry_started_ns) / 1_000_000 if self._entry_started_ns else 0.0
+                # 翻转计数：本帧由"不满足"变"满足"记一次。lost 清零前若 flips 无增量，
+                # 说明清零来自 lost 路径；若 flips 增量大，说明是姿势在门槛附近翻动。
+                if gate_eligible and not self._gate_diag_prev_eligible:
+                    self._gate_diag_eligible_flips += 1
+                self._gate_diag_prev_eligible = gate_eligible
 
                 sig = (
                     self._gate_active, gate_eligible, palm_presented,
@@ -414,12 +423,13 @@ class GestureEngine:
                     arrival_ns = self._last_hand_arrival_ns
                     _DIAG_LOGGER.info(
                         "geom ts=%d arrival=%d arrive_ms=%.0f gate_active=%s "
-                        "entry_started=%s held_ms=%.0f state=%s gesture=%s",
+                        "entry_started=%s held_ms=%.0f flips=%d state=%s gesture=%s",
                         now,
                         arrival_ns if arrival_ns is not None else -1,
                         (arrival_ns - now) / 1_000_000 if arrival_ns is not None else -1.0,
                         self._gate_active,
                         self._entry_started_ns is not None, held_ms,
+                        self._gate_diag_eligible_flips,
                         self.state.value, self.current_gesture.value,
                     )
                     _DIAG_LOGGER.info(
@@ -460,7 +470,9 @@ class GestureEngine:
                             gate_eligible,
                         )
             else:
-                # landmarks 不完整（partial 或真 0 点）：简单限流
+                # landmarks 不完整（partial 或真 0 点）：判定链必然不满足，
+                # 同步翻转状态，避免下一帧被误记成 False→True。
+                self._gate_diag_prev_eligible = False
                 if self._gate_diag_frame % 5 == 0:
                     _DIAG_LOGGER.info(
                         "geom ts=%d landmarks_len=%d partial_finger=%s "
@@ -885,16 +897,19 @@ class GestureEngine:
             if arrival is None:
                 _DIAG_LOGGER.info(
                     "lost-trigger now=%d last_hand_ns=%s elapsed_ms=%.0f "
-                    "arrival=None（本 episode 未记录到达时刻，无法拆分）hand_lost_ms=%d",
-                    now, self.last_hand_ns, elapsed_ms, self.config.hand_lost_ms,
+                    "arrival=None（本 episode 未记录到达时刻，无法拆分）"
+                    "flips=%d hand_lost_ms=%d",
+                    now, self.last_hand_ns, elapsed_ms,
+                    self._gate_diag_eligible_flips, self.config.hand_lost_ms,
                 )
             else:
                 _DIAG_LOGGER.info(
                     "lost-trigger now=%d last_hand_ns=%s elapsed_ms=%.0f "
-                    "arrival=%d dwell_ms=%.0f gap_ms=%.0f hand_lost_ms=%d",
+                    "arrival=%d dwell_ms=%.0f gap_ms=%.0f flips=%d hand_lost_ms=%d",
                     now, self.last_hand_ns, elapsed_ms, arrival,
                     (arrival - self.last_hand_ns) / 1_000_000,
                     (now - arrival) / 1_000_000,
+                    self._gate_diag_eligible_flips,
                     self.config.hand_lost_ms,
                 )
         if self.config.entry_gate_enabled:
