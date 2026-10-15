@@ -61,6 +61,8 @@ def _status_line(snapshot: PipelineSnapshot, motion: MotionOutcome | None) -> tu
         return ("控制已暂停（Ctrl+Alt+G 或 M 恢复）", YELLOW)
     if snapshot.gesture == GestureType.LOST:
         return ("未检测到有效手部", YELLOW)
+    if snapshot.gesture == GestureType.GATE_IDLE:
+        return ("未进入控制态：掌心朝镜 + 五指张开 保持 0.3s", YELLOW)
     return (snapshot.message or "跟踪中", GREEN)
 
 

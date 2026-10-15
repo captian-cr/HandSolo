@@ -109,6 +109,60 @@ def _is_fist(points: tuple[Landmark, ...]) -> bool:
     return mean_distance / width < 1.25
 
 
+#: 进入门阈值：拇指外展程度 = 拇指尖到小指掌指关节的距离 / 掌宽。
+_ENTRY_THUMB_SPREAD_MIN = 0.9
+#: 进入门阈值：掌面正对镜头程度 = 掌宽 / 腕到中指指尖的距离，用于排除侧掌。
+_ENTRY_PALM_FRONTAL_MIN = 0.25
+
+
+def _is_five_open(points: tuple[Landmark, ...]) -> bool:
+    """五指张开：四指伸直且拇指明显外展。
+
+    ``_is_open_palm`` 只要 3/4 指伸直（照顾日常滚轮姿势），进不了进入门。
+    进入门是全局闸门，判据必须更严，否则"半握"也能把闸门顶开。
+    """
+
+    if not all(_finger_extensions(points)):
+        return False
+    return (
+        _distance_2d(points[4], points[17]) / _palm_width(points)
+        >= _ENTRY_THUMB_SPREAD_MIN
+    )
+
+
+def _palm_presented(points: tuple[Landmark, ...], handedness: str) -> bool:
+    """掌心朝镜且掌面基本正对镜头（排除侧掌与手背朝镜）。
+
+    单目模型给不出掌心法向，但"掌心/掌背"在图像里是镜像关系：掌心朝镜时
+    拇指落在掌轴(5→17)的一侧，掌背朝镜时落在另一侧。取掌轴与"指向拇指"
+    矢量(5→4)的二维叉积，符号对图像内旋转不变；再用 MediaPipe 的
+    handedness（自拍镜像输入下即解剖学左右手）选择期望符号。
+
+    符号推导（镜像自拍坐标，x 向右、y 向下）：
+      * 右手掌心朝镜：拇指外侧朝人体右侧→画面左→镜像后画面右，故掌轴
+        (5→17) 指向 +x，指向拇指的矢量 (5→4) 指向 -y，叉积为正；
+      * 手背朝镜则拇指翻到另一侧，叉积为负；
+      * 左手关于画面纵轴镜像，符号相反。
+
+    handedness 缺失时返回 False（保守关闭闸门）：宁可进不去控制态，也不
+    能让手背/侧掌把手误开闸门。
+    """
+
+    span = _distance_2d(points[0], points[12])
+    if span < 1e-6 or _palm_width(points) / span < _ENTRY_PALM_FRONTAL_MIN:
+        return False
+    if handedness not in ("Left", "Right"):
+        return False
+    across_x = points[17].x - points[5].x
+    across_y = points[17].y - points[5].y
+    thumb_x = points[4].x - points[5].x
+    thumb_y = points[4].y - points[5].y
+    cross = across_x * thumb_y - across_y * thumb_x
+    if abs(cross) < 1e-9:
+        return False
+    return cross > 0.0 if handedness == "Right" else cross < 0.0
+
+
 @dataclass(slots=True)
 class GestureDebug:
     """最近一次识别的几何量，便于后续校准。"""
@@ -129,6 +183,9 @@ class GestureEngine:
         self.paused = False
         self.last_hand_ns: int | None = None
         self.debug = GestureDebug()
+        # 进入门：entry_gate_enabled 关闭时恒为 True，与旧行为完全等价。
+        self._gate_active = not config.entry_gate_enabled
+        self._entry_started_ns: int | None = None
 
         self._left_active = False
         self._left_started_ns: int | None = None
@@ -153,6 +210,24 @@ class GestureEngine:
     def update_config(self, config: AppConfig) -> None:
         self.config = config
         self.filter = self._build_pointer_filter(config)
+        if not config.entry_gate_enabled:
+            # 关掉闸门时立刻回到"始终可控"，不再要求重新做进入姿势。
+            self._gate_active = True
+            self._entry_started_ns = None
+
+    def _exit_gate(self) -> None:
+        """握拳退出控制态：闸门回到未开。
+
+        退出后手必须重新做进入姿势（掌心朝镜+五指张开 300ms）才能再控制，
+        这样一次幻影握拳最多只是把闸门关上，不会连锁触发下游动作。
+        """
+
+        self._gate_active = False
+        self._entry_started_ns = None
+        self._reset_transient()
+        self.filter.reset()
+        self.state = ControlState.IDLE
+        self.current_gesture = GestureType.GATE_IDLE
 
     @staticmethod
     def _build_pointer_filter(config: AppConfig) -> OneEuroPointerFilter:
@@ -264,6 +339,33 @@ class GestureEngine:
                 return self.tick(observation.timestamp_ns)
 
         now = observation.timestamp_ns
+        # ---- 进入门（测量域闸门）----
+        # 未进入控制态时只评估"进入姿势"，捏合/翻页/拖拽等下游判定一概不跑。
+        # 这样脸被误判成手时最多停在 gate_idle，幻影手势连控制态都进不去。
+        if not self._gate_active:
+            self.last_hand_ns = now
+            self._lost_reported = False
+            if (
+                len(points) == 21
+                and _is_five_open(points)
+                and _palm_presented(points, observation.handedness)
+            ):
+                if self._entry_started_ns is None:
+                    self._entry_started_ns = now
+                held_ms = (now - self._entry_started_ns) / 1_000_000
+                if held_ms < self.config.entry_hold_ms:
+                    self.state = ControlState.IDLE
+                    self.current_gesture = GestureType.GATE_IDLE
+                    return []
+                # 姿势已满时长：本帧开闸，继续走正常手势判定。
+                self._gate_active = True
+            else:
+                self._entry_started_ns = None
+                self.state = ControlState.IDLE
+                self.current_gesture = GestureType.GATE_IDLE
+                return []
+            self._entry_started_ns = None
+
         if observation.partial_finger and observation.partial_position is not None:
             commands = self._release_left(now)
             self._reset_transient()
@@ -396,6 +498,27 @@ class GestureEngine:
                 self.current_gesture = GestureType.SCROLL
                 self.state = ControlState.SCROLLING
                 return []
+            if self.config.entry_gate_enabled:
+                # 进入门语义：握拳 = 退出控制态。
+                # 退出判定必须豁免 CLICK/DRAG——捏合本身就会让手形偏离"张开"，
+                # 若在点击/拖拽中把拳头当成退出信号，用户一捏合就掉出控制态，
+                # 直接自锁。这些状态下拳头只冻结本次动作，不关闸门。
+                self.current_gesture = GestureType.FIST
+                if not (
+                    self._left_active
+                    or self._right_active
+                    or self._left_button_down
+                ):
+                    if self._fist_started_ns is None:
+                        self._fist_started_ns = now
+                    held_ms = (now - self._fist_started_ns) / 1_000_000
+                    if held_ms >= self.config.fist_hold_ms:
+                        commands = self._release_left(now)
+                        self._fist_started_ns = None
+                        self._exit_gate()
+                        return commands
+                return []
+            # 进入门未启用：保留"握拳切换暂停"的旧语义。
             commands = self._release_left(now)
             self._reset_transient()
             self.current_gesture = GestureType.FIST
@@ -623,4 +746,9 @@ class GestureEngine:
         self.state = ControlState.LOST
         self.current_gesture = GestureType.LOST
         self._lost_reported = True
+        if self.config.entry_gate_enabled:
+            # 手出画 ≥ hand_lost_ms 也是进入门的退出条件：重新入画后必须再
+            # 做一次进入姿势，避免"手一晃出去又晃回来"直接恢复控制。
+            self._gate_active = False
+            self._entry_started_ns = None
         return commands

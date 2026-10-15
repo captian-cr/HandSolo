@@ -76,6 +76,9 @@ class GestureType(str, Enum):
     FIST = "fist"
     PAUSED = "paused"
     LOST = "lost"
+    # 进入门：手在画面里但尚未做出进入姿势，处于"闸门未开"态。一切下游
+    # 手势（捏合/翻页/拖拽）在此态一律不执行，用来挡住幻影手势。
+    GATE_IDLE = "gate_idle"
     # 第二阶段：轨迹手势（DTW）
     MOTION_ARMED = "motion_armed"
     MOTION_DRAWING = "motion_drawing"

@@ -115,6 +115,38 @@ def open_palm_points() -> tuple[Landmark, ...]:
     return tuple(points)
 
 
+def entry_palm_points() -> tuple[Landmark, ...]:
+    """进入门姿势：五指张开 + 掌心朝镜（镜像自拍坐标系下的右手）。
+
+    坐标系约定：摄像头帧先做 ``cv2.flip`` 再送 MediaPipe，而 MediaPipe 的
+    handedness 假定输入是"已镜像的自拍画面"，所以标签就是真实左右手。
+    自拍镜像下的右手掌心朝镜，拇指落在画面右侧（解剖学姿势里拇指外侧朝人
+    体右侧，正对镜头时在画面左，镜像后翻到右）。此夹具据此构造，掌轴
+    (5→17) 与指向拇指的矢量 (5→4) 的二维叉积为正。
+    """
+
+    points = open_palm_points()
+    center_x = sum(points[index].x for index in (0, 5, 9, 13, 17)) / 5
+    return tuple(Landmark(2 * center_x - point.x, point.y, point.z) for point in points)
+
+
+def entry_back_points() -> tuple[Landmark, ...]:
+    """误进防护：同样五指张开，但手背朝镜（拇指落在掌轴另一侧）。"""
+
+    return open_palm_points()
+
+
+def side_palm_points() -> tuple[Landmark, ...]:
+    """误进防护：侧掌。掌面几乎平行于视线，二维掌宽被压扁。"""
+
+    points = list(entry_palm_points())
+    axis = points[9].x
+    return tuple(
+        Landmark(axis + (point.x - axis) * 0.12, point.y, point.z)
+        for point in points
+    )
+
+
 def translate_points(
     points: tuple[Landmark, ...],
     dx: float = 0.0,

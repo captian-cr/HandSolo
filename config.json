@@ -28,6 +28,8 @@
   "palm_rotation_threshold": 0.18,
   "page_gestures_enabled": true,
   "page_swipe_threshold": 0.7,
+  "entry_gate_enabled": true,
+  "entry_hold_ms": 300,
   "partial_finger_tracking": true,
   "partial_tracking_frames": 0,
   "cursor_snap_enabled": true,

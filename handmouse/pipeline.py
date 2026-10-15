@@ -356,6 +356,8 @@ class GesturePipeline:
                     self._snapshot.message = "控制已暂停"
                 elif gesture == GestureType.LOST:
                     self._snapshot.message = "未检测到有效手部"
+                elif gesture == GestureType.GATE_IDLE:
+                    self._snapshot.message = "未进入控制态（掌心朝镜 + 五指张开）"
                 elif gesture == GestureType.DRAG:
                     self._snapshot.message = "正在拖拽"
                 elif gesture == GestureType.SCROLL:

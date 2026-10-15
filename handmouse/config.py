@@ -92,6 +92,16 @@ class AppConfig:
     page_gestures_enabled: bool = True
     page_swipe_threshold: float = 0.70
 
+    # ---- 进入门（测量域闸门）----
+    # 全局闸门：未进入控制态时，下游手势（捏合/翻页/拖拽）一律不执行，从根上
+    # 挡住"脸被误判成手"产生的幻影动作。默认关，与 virtual_desk_experimental
+    # 一样先在一轮引导基线里验证，再决定是否转正。
+    entry_gate_enabled: bool = False
+    # 进入姿势（掌心朝镜 + 五指张开）需连续保持的时间；与双指悬停同量级，
+    # 不引入新的时间常数。退出复用既有常数：握拳退出沿用 fist_hold_ms，
+    # 手出画退出沿用 hand_lost_ms。
+    entry_hold_ms: int = 300
+
     # ---- 局部续跟踪 ----
     partial_finger_tracking: bool = True
     # 0 表示只按光流质量决定续跟踪寿命；正数用于诊断或保守限时。
@@ -167,6 +177,7 @@ class AppConfig:
         self.scroll_sensitivity = max(0.2, min(4.0, float(self.scroll_sensitivity)))
         self.palm_rotation_threshold = max(0.08, min(0.60, float(self.palm_rotation_threshold)))
         self.page_swipe_threshold = max(0.35, min(1.5, float(self.page_swipe_threshold)))
+        self.entry_hold_ms = max(80, min(1500, int(self.entry_hold_ms)))
         self.partial_tracking_frames = max(0, min(600, int(self.partial_tracking_frames)))
         self.min_detection_confidence = max(0.25, min(0.90, float(self.min_detection_confidence)))
         self.min_presence_confidence = max(0.25, min(0.90, float(self.min_presence_confidence)))

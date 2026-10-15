@@ -4,6 +4,8 @@ from handmouse.gestures import GestureEngine
 
 from conftest import (
     ambiguous_right_pinch_points,
+    entry_back_points,
+    entry_palm_points,
     fist_like_left_pinch_points,
     fist_points,
     left_pinch_points,
@@ -15,6 +17,7 @@ from conftest import (
     right_pinch_points,
     rotated_projected_closed_points,
     rotated_scroll_points,
+    side_palm_points,
     translate_points,
 )
 
@@ -457,3 +460,144 @@ def test_pointer_falls_back_to_lost_when_hand_disappears() -> None:
     engine.tick(BASE + (config.hand_lost_ms + 50) * 1_000_000)
 
     assert engine.current_gesture.value == "lost"
+
+
+# ---------------- 进入门（测量域闸门）----------------
+
+
+def _enter_gate(engine, start_ns: int = BASE) -> None:
+    """喂一帧进入姿势、再喂一帧（相距 ≥300ms）完成开闸。"""
+
+    engine.process(observation(entry_palm_points(), start_ns))
+    engine.process(observation(entry_palm_points(), start_ns + 320_000_000))
+
+
+def test_entry_gate_blocks_downstream_gestures_until_presented() -> None:
+    """未进入控制态时，捏合/翻页/握拳等下游手势一律不执行。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+
+    assert engine.process(observation(pointer_points(), BASE)) == []
+    assert engine.process(observation(left_pinch_points(), BASE + 50_000_000)) == []
+    assert engine.process(observation(fist_points(), BASE + 100_000_000)) == []
+    assert engine.process(observation(open_palm_points(), BASE + 150_000_000)) == []
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_entry_gate_opens_after_continuous_hold() -> None:
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    assert engine.process(observation(entry_palm_points(), BASE)) == []
+    assert engine.current_gesture.value == "gate_idle"
+
+    engine.process(observation(entry_palm_points(), BASE + 320_000_000))
+    assert engine.current_gesture.value != "gate_idle"
+
+    commands = engine.process(observation(pointer_points(), BASE + 400_000_000))
+    assert kinds(commands) == [MouseCommandType.MOVE]
+
+
+def test_entry_gate_hold_restarts_when_pose_breaks() -> None:
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    engine.process(observation(entry_palm_points(), BASE))
+    engine.process(observation(pointer_points(), BASE + 100_000_000))
+    engine.process(observation(entry_palm_points(), BASE + 200_000_000))
+
+    engine.process(observation(entry_palm_points(), BASE + 450_000_000))
+    assert engine.current_gesture.value == "gate_idle"
+
+    engine.process(observation(entry_palm_points(), BASE + 520_000_000))
+    assert engine.current_gesture.value != "gate_idle"
+
+
+def test_entry_gate_rejects_back_of_hand() -> None:
+    """误进防护：手背朝镜的五指张开不得开闸门。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    for step in range(20):
+        engine.process(observation(entry_back_points(), BASE + step * 30_000_000))
+
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_entry_gate_rejects_side_palm() -> None:
+    """误进防护：侧掌不得开闸门。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    for step in range(20):
+        engine.process(observation(side_palm_points(), BASE + step * 30_000_000))
+
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_entry_gate_rejects_fist() -> None:
+    """误进防护：握拳/半握不得开闸门。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    for step in range(20):
+        engine.process(observation(fist_points(), BASE + step * 30_000_000))
+
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_entry_gate_is_closed_when_handedness_missing() -> None:
+    """左右手不可判定时保守关闸：宁可进不去，也不能让手背误开闸门。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True))
+    for step in range(20):
+        engine.process(
+            HandObservation(
+                landmarks=entry_palm_points(),
+                handedness="",
+                timestamp_ns=BASE + step * 30_000_000,
+                inference_ms=8.0,
+            ),
+        )
+
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_fist_exits_gate_and_requires_reentry() -> None:
+    """退出条件 1：握拳退出控制态，重新入画必须再做进入姿势。"""
+
+    engine = GestureEngine(AppConfig(entry_gate_enabled=True, fist_hold_ms=500))
+    _enter_gate(engine)
+    engine.process(observation(pointer_points(), BASE + 400_000_000))
+
+    engine.process(observation(fist_points(), BASE + 500_000_000))
+    engine.process(observation(fist_points(), BASE + 1_020_000_000))
+    assert engine.current_gesture.value == "gate_idle"
+
+    assert engine.process(observation(pointer_points(), BASE + 1_100_000_000)) == []
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_hand_out_exits_gate_and_requires_reentry() -> None:
+    """退出条件 2：手出画 ≥ hand_lost_ms 退出控制态。"""
+
+    config = AppConfig(entry_gate_enabled=True)
+    engine = GestureEngine(config)
+    _enter_gate(engine)
+    engine.process(observation(pointer_points(), BASE + 400_000_000))
+
+    engine.tick(BASE + 400_000_000 + (config.hand_lost_ms + 50) * 1_000_000)
+    assert engine.current_gesture.value == "lost"
+
+    assert engine.process(observation(pointer_points(), BASE + 1_000_000_000)) == []
+    assert engine.current_gesture.value == "gate_idle"
+
+
+def test_fist_during_click_or_drag_does_not_exit_gate() -> None:
+    """误出防护：拖拽中握拳不得踢出控制态，否则一捏合就自锁。"""
+
+    engine = GestureEngine(
+        AppConfig(entry_gate_enabled=True, drag_hold_ms=300, fist_hold_ms=500),
+    )
+    _enter_gate(engine)
+    engine.process(observation(left_pinch_points(), BASE + 400_000_000))
+    engine.process(observation(left_pinch_points(), BASE + 800_000_000))
+    assert engine._left_button_down is True
+
+    engine.process(observation(fist_points(), BASE + 1_000_000_000))
+    engine.process(observation(fist_points(), BASE + 2_000_000_000))
+
+    assert engine.current_gesture.value != "gate_idle"
