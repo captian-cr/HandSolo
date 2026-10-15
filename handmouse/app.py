@@ -161,7 +161,6 @@ def main(argv: list[str] | None = None) -> int:
         "1", "true", "yes", "on",
     )
     if verbose_gate:
-        import logging.handlers
         diag_dir = PROJECT_ROOT / "logs"
         diag_dir.mkdir(parents=True, exist_ok=True)
         diag_path = diag_dir / f"gate-diag-{time.strftime('%Y%m%d-%H%M%S')}.log"
