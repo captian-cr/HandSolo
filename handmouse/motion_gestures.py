@@ -23,6 +23,8 @@ Vimoose 的手势状态机是"姿态即时触发"（捏合=点击），而画字
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from math import hypot
@@ -39,6 +41,12 @@ from handmouse.dtw import (
 from handmouse.gestures import _distance_2d, _finger_extensions, _palm_width
 
 Point = tuple[float, float]
+
+# 诊断开关：环境变量控制，与 gestures/vision 共用同一开关（默认关闭）。
+VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_DIAG_LOGGER = logging.getLogger("handmouse.gate-diag")
 
 
 class MotionState(str, Enum):
@@ -97,6 +105,10 @@ class MotionGestureEngine:
         self._last_point_ns: int | None = None
         self._candidate_since_ns: int | None = None
         self._last_hand_ns: int | None = None
+        # 诊断用：最近一次观测被 process() 消费的墙钟时刻（到达时刻戳）。
+        # 与 _last_hand_ns（采集时刻戳）配对，用于把 tick() 的 elapsed 拆两段。
+        # 仅在 VERBOSE_GATE 下写入。
+        self._last_hand_arrival_ns: int | None = None
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -151,6 +163,8 @@ class MotionGestureEngine:
             return self.tick(now)
 
         self._last_hand_ns = now
+        if VERBOSE_GATE:
+            self._last_hand_arrival_ns = monotonic_ns()
         width = _palm_width(points)
         pinch_ratio = _distance_2d(points[4], points[8]) / width
         tip = (float(points[8].x), float(points[8].y))
@@ -172,6 +186,14 @@ class MotionGestureEngine:
             if self._candidate_since_ns is not None and (
                 now - self._candidate_since_ns
             ) / 1_000_000 >= self.config.motion_confirm_timeout_ms:
+                if VERBOSE_GATE:
+                    _DIAG_LOGGER.info(
+                        "motion-trigger kind=confirm_timeout now=%d candidate_since_ns=%d "
+                        "elapsed_ms=%.0f timeout_ms=%d",
+                        now, self._candidate_since_ns,
+                        (now - self._candidate_since_ns) / 1_000_000,
+                        self.config.motion_confirm_timeout_ms,
+                    )
                 return self.reset("确认超时，已丢弃本次轨迹")
             return self._candidate_outcome("捏合确认或等待超时")
 
@@ -179,6 +201,29 @@ class MotionGestureEngine:
             if self._last_hand_ns is not None and (
                 now - self._last_hand_ns
             ) / 1_000_000 >= self.config.motion_hand_lost_ms:
+                if VERBOSE_GATE:
+                    # 与 gestures.tick() 同一类清零机制，独立取证。
+                    arrival = self._last_hand_arrival_ns
+                    if arrival is None:
+                        _DIAG_LOGGER.info(
+                            "motion-trigger kind=hand_lost now=%d last_hand_ns=%d "
+                            "elapsed_ms=%.0f arrival=None hand_lost_ms=%d state=%s",
+                            now, self._last_hand_ns,
+                            (now - self._last_hand_ns) / 1_000_000,
+                            self.config.motion_hand_lost_ms, self.state.value,
+                        )
+                    else:
+                        _DIAG_LOGGER.info(
+                            "motion-trigger kind=hand_lost now=%d last_hand_ns=%d "
+                            "elapsed_ms=%.0f arrival=%d dwell_ms=%.0f gap_ms=%.0f "
+                            "hand_lost_ms=%d state=%s",
+                            now, self._last_hand_ns,
+                            (now - self._last_hand_ns) / 1_000_000,
+                            arrival,
+                            (arrival - self._last_hand_ns) / 1_000_000,
+                            (now - arrival) / 1_000_000,
+                            self.config.motion_hand_lost_ms, self.state.value,
+                        )
                 return self.reset("手部丢失，已作废本次轨迹")
             return self._armed_outcome("保持双指姿势开始绘制")
 

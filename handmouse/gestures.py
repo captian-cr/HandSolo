@@ -198,6 +198,11 @@ class GestureEngine:
         # 诊断用：进入门几何判定层的帧计数和去重缓存
         self._gate_diag_frame = 0
         self._gate_diag_last_sig: tuple | None = None
+        # 诊断用：最近一次观测被 process() 消费的墙钟时刻（到达时刻戳）。
+        # 与 last_hand_ns（采集时刻戳）配对，可把 tick() 的 elapsed 拆成
+        # "取包延迟"(arrival-last_hand_ns) 与 "消费后空转"(now-arrival) 两段。
+        # 仅在 VERBOSE_GATE 下写入，生产路径零变化。
+        self._last_hand_arrival_ns: int | None = None
 
         self._left_active = False
         self._left_started_ns: int | None = None
@@ -357,6 +362,8 @@ class GestureEngine:
         # 相同内容去重用 signature。所有新计算都包在 if VERBOSE_GATE 内。
         if VERBOSE_GATE:
             self._gate_diag_frame += 1
+            # 到达时刻戳：本帧从检测包交付到控制线程的墙钟时刻。
+            self._last_hand_arrival_ns = monotonic_ns()
             should_log = False
 
             if len(points) == 21:
@@ -404,9 +411,14 @@ class GestureEngine:
 
                 if should_log:
                     self._gate_diag_last_sig = sig
+                    arrival_ns = self._last_hand_arrival_ns
                     _DIAG_LOGGER.info(
-                        "geom ts=%d gate_active=%s entry_started=%s held_ms=%.0f state=%s gesture=%s",
-                        now, self._gate_active,
+                        "geom ts=%d arrival=%d arrive_ms=%.0f gate_active=%s "
+                        "entry_started=%s held_ms=%.0f state=%s gesture=%s",
+                        now,
+                        arrival_ns if arrival_ns is not None else -1,
+                        (arrival_ns - now) / 1_000_000 if arrival_ns is not None else -1.0,
+                        self._gate_active,
                         self._entry_started_ns is not None, held_ms,
                         self.state.value, self.current_gesture.value,
                     )
@@ -866,6 +878,25 @@ class GestureEngine:
         self.state = ControlState.LOST
         self.current_gesture = GestureType.LOST
         self._lost_reported = True
+        if VERBOSE_GATE:
+            # 只在 lost 真正触发时打（_lost_reported 保证每 episode 一行）。
+            # elapsed = dwell(取包延迟) + gap(消费后空转)，两段之和恒等于 elapsed_ms。
+            arrival = self._last_hand_arrival_ns
+            if arrival is None:
+                _DIAG_LOGGER.info(
+                    "lost-trigger now=%d last_hand_ns=%s elapsed_ms=%.0f "
+                    "arrival=None（本 episode 未记录到达时刻，无法拆分）hand_lost_ms=%d",
+                    now, self.last_hand_ns, elapsed_ms, self.config.hand_lost_ms,
+                )
+            else:
+                _DIAG_LOGGER.info(
+                    "lost-trigger now=%d last_hand_ns=%s elapsed_ms=%.0f "
+                    "arrival=%d dwell_ms=%.0f gap_ms=%.0f hand_lost_ms=%d",
+                    now, self.last_hand_ns, elapsed_ms, arrival,
+                    (arrival - self.last_hand_ns) / 1_000_000,
+                    (now - arrival) / 1_000_000,
+                    self.config.hand_lost_ms,
+                )
         if self.config.entry_gate_enabled:
             # 手出画 ≥ hand_lost_ms 也是进入门的退出条件：重新入画后必须再
             # 做一次进入姿势，避免"手一晃出去又晃回来"直接恢复控制。
