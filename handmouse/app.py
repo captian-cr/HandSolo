@@ -13,10 +13,15 @@ PySide6，也就不会有打包体积和线程-事件循环耦合的问题。
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
+import subprocess
 import sys
 import time
+from dataclasses import asdict
 from math import hypot
+from pathlib import Path
 from types import SimpleNamespace
 
 from handmouse import __version__, debug_view
@@ -165,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"配置={store.path}  安全模式={'开' if safe_mode else '关'}")
     if not safe_mode:
         store.save(config)
+    print(_environment_line(config, safe_mode))
     _print_bindings(config)
     print("按键：M 暂停/恢复(接管) | ESC/Q 退出 | Ctrl+Alt+G 接管 | Ctrl+Alt+Esc 急停 | Ctrl+Alt+Q 退出")
 
@@ -184,11 +190,14 @@ def main(argv: list[str] | None = None) -> int:
     deadline = (
         time.monotonic() + args.diagnostic_seconds if args.diagnostic_seconds > 0 else None
     )
+    next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
     exit_code = 0
     try:
         while not state.quit:
             _apply_pending_hotkeys(state, pipeline)
-
+            if time.monotonic() >= next_heartbeat:
+                _print_heartbeat(pipeline.snapshot())
+                next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
             frame_packet, detection = pipeline.get_preview()
             if frame_packet is None:
                 time.sleep(0.01)
@@ -255,20 +264,78 @@ def _handle_key(
     return True
 
 
-def _print_diagnostics(snapshot) -> None:
+HEARTBEAT_SECONDS = 10.0
+
+
+def _environment_line(config: AppConfig, safe_mode: bool) -> str:
+    """环境指纹：多轮验证靠它确认"同一环境"，并把日志绑到具体的 commit 与配置。
+
+    哈希的是**生效配置**（含 CLI 覆盖），不是磁盘上那份文件——否则 ``--margin``
+    这类覆盖改了环境却对不上指纹。
+    """
+
+    digest = hashlib.sha256(
+        json.dumps(asdict(config), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    commit = "none"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        commit = result.stdout.strip() or "none"
+    except (OSError, subprocess.SubprocessError):
+        commit = "none"  # 冻结成 EXE 后没有 git，不影响运行
+    return (
+        f"[环境] commit={commit} config_sha256={digest} "
+        f"camera={config.camera_index}@{config.camera_width}x{config.camera_height}"
+        f"@{config.camera_fps}fps mirror={config.mirror} "
+        f"det={config.min_detection_confidence} pres={config.min_presence_confidence} "
+        f"track={config.min_tracking_confidence} "
+        f"motion={config.motion_gestures_enabled} snap={config.cursor_snap_enabled} "
+        f"safe={safe_mode}"
+    )
+
+
+def _metrics_text(snapshot) -> str:
     metrics = snapshot.metrics
+    return (
+        "capture_fps=%.1f inference_fps=%.1f latency_ms=%.1f latency_p50_ms=%.1f "
+        "latency_p95_ms=%.1f hand_detection_rate=%.1f dropped_frames=%d "
+        "cpu_percent=%.1f memory_mb=%.1f error=%s"
+        % (
+            metrics.capture_fps,
+            metrics.inference_fps,
+            metrics.latency_ms,
+            metrics.latency_p50_ms,
+            metrics.latency_p95_ms,
+            metrics.hand_detection_rate,
+            metrics.dropped_frames,
+            metrics.cpu_percent,
+            metrics.memory_mb,
+            snapshot.camera_error or "none",
+        )
+    )
+
+
+def _print_diagnostics(snapshot) -> None:
+    print(f"诊断完成 {_metrics_text(snapshot)}")
+
+
+def _print_heartbeat(snapshot) -> None:
+    """每 10 秒一行采样：让"这一轮画面里到底有没有手"当场可读。
+
+    不这样做的话，只能等整轮结束才拿到 ``hand_detection_rate``，而"有没有手"
+    恰好是判断测量是否干净的**唯一**依据（没手时必须是 0.0）。
+    """
+
     print(
-        "诊断完成 "
-        f"capture_fps={metrics.capture_fps:.1f} "
-        f"inference_fps={metrics.inference_fps:.1f} "
-        f"latency_ms={metrics.latency_ms:.1f} "
-        f"latency_p50_ms={metrics.latency_p50_ms:.1f} "
-        f"latency_p95_ms={metrics.latency_p95_ms:.1f} "
-        f"hand_detection_rate={metrics.hand_detection_rate:.1f} "
-        f"dropped_frames={metrics.dropped_frames} "
-        f"cpu_percent={metrics.cpu_percent:.1f} "
-        f"memory_mb={metrics.memory_mb:.1f} "
-        f"error={snapshot.camera_error or 'none'}"
+        f"[采样] gesture={snapshot.gesture.value} paused={snapshot.paused} "
+        f"{_metrics_text(snapshot)}"
     )
 
 
