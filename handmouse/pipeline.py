@@ -205,6 +205,11 @@ class ControlWorker(threading.Thread):
                 return
         self._leave_motion_mode()
         self._execute_commands(self.engine.tick(timestamp_ns))
+        # tick 是最容易发生状态迁移的路径（手离画 → lost），但这里过去没有回调
+        # on_state：迁移既不落 [状态] 日志，也不更新快照手势，表现为"手早就不在
+        # 画面里、状态却冻在上一个手势"。on_state 内部按 (gesture, paused) 去重，
+        # 8ms 一次的高频调用不会刷屏。
+        self.on_state(self.engine.current_gesture, self.engine.paused)
 
     def run(self) -> None:
         revision = 0

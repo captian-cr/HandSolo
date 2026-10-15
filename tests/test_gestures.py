@@ -429,3 +429,31 @@ def test_partial_index_moves_but_partial_middle_only_reports_identity() -> None:
     assert kinds(engine.process(index)) == [MouseCommandType.MOVE]
     assert engine.process(middle) == []
     assert engine.current_gesture.value == "partial_middle"
+
+
+def test_left_pinch_falls_back_to_lost_when_hand_disappears() -> None:
+    """r2 实机复现：捏合态下手离画（盖镜头/拔摄像头）后状态冻在 left_pinch。
+
+    硬线 1/6 都要求"手离画能回 lost"，replay baseline-r2 时 58 秒无手却
+    始终停在 left_pinch，说明失联保护在这条路径上不可达。
+    """
+
+    config = AppConfig()
+    engine = GestureEngine(config)
+    engine.process(observation(left_pinch_points(), BASE))
+    assert engine.current_gesture.value == "left_pinch"
+
+    engine.tick(BASE + (config.hand_lost_ms + 50) * 1_000_000)
+
+    assert engine.current_gesture.value == "lost"
+
+
+def test_pointer_falls_back_to_lost_when_hand_disappears() -> None:
+    config = AppConfig()
+    engine = GestureEngine(config)
+    engine.process(observation(pointer_points(), BASE))
+    assert engine.current_gesture.value == "pointer"
+
+    engine.tick(BASE + (config.hand_lost_ms + 50) * 1_000_000)
+
+    assert engine.current_gesture.value == "lost"
