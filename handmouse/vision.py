@@ -347,6 +347,11 @@ class HandLandmarkerWorker(threading.Thread):
         ]
         self._face_cache: tuple[list[tuple[float, float, float, float]], int] = ([], 0)
         self._FACE_CACHE_NS = 500_000_000  # 500ms 内复用上次脸检测结果
+        # 没检出脸时必须照样缓存：实测在室内光线下 Haar 几乎检不出这张脸
+        # （r2 的 314 张取证帧只有 4 张命中），若空结果不入缓存，就会退化成
+        # 每帧全量跑两个级联分类器，capture_fps 从 29.7 掉到 10。空结果有效期
+        # 短一些，避免脸重新入画后长时间漏过滤。
+        self._FACE_MISS_CACHE_NS = 200_000_000
 
     def _callback(
         self,
@@ -374,7 +379,8 @@ class HandLandmarkerWorker(threading.Thread):
         face_bboxes_norm: list[tuple[float, float, float, float]] = []
         if result.hand_landmarks:
             cached_faces, cached_ns = self._face_cache
-            if callback_ns - cached_ns < self._FACE_CACHE_NS and cached_faces:
+            cache_ttl = self._FACE_CACHE_NS if cached_faces else self._FACE_MISS_CACHE_NS
+            if callback_ns - cached_ns < cache_ttl:
                 face_bboxes_norm = cached_faces
             else:
                 gray = cv2.cvtColor(output_frame, cv2.COLOR_BGR2GRAY)
