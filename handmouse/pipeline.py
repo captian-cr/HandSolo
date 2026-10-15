@@ -263,6 +263,8 @@ class GesturePipeline:
         self._last_resource_sample_ns = 0
         self._latencies: deque[float] = deque(maxlen=600)
         self._detection_results: deque[tuple[int, bool]] = deque(maxlen=180)
+        self._packets_total = 0
+        self._hand_packets_total = 0
         # 轨迹手势状态日志去重用的上一轮签名，避免每帧刷屏。
         self._motion_signature: tuple[str, tuple[str, ...], str] | None = None
 
@@ -302,6 +304,9 @@ class GesturePipeline:
             self._latencies.append(latency_ms)
             has_hand = bool(packet.observations)
             self._detection_results.append((now, has_hand))
+            self._packets_total += 1
+            if has_hand:
+                self._hand_packets_total += 1
             self._snapshot.metrics.handedness_score = (
                 packet.observations[0].handedness_score if has_hand else 0.0
             )
@@ -515,6 +520,8 @@ class GesturePipeline:
                 metrics.hand_detection_rate = 100.0 * sum(
                     1 for _timestamp, has_hand in self._detection_results if has_hand
                 ) / len(self._detection_results)
+            metrics.packets_total = self._packets_total
+            metrics.hand_packets_total = self._hand_packets_total
             if self._latencies:
                 ordered = sorted(self._latencies)
                 metrics.latency_p50_ms = ordered[round((len(ordered) - 1) * 0.50)]

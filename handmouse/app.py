@@ -24,7 +24,7 @@ from math import hypot
 from pathlib import Path
 from types import SimpleNamespace
 
-from handmouse import __version__, debug_view
+from handmouse import __version__, debug_view, guided
 from handmouse.config import AppConfig, ConfigStore
 from handmouse.hotkeys import HotkeyMonitor
 from handmouse.launch import LaunchDispatcher
@@ -78,6 +78,18 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         help="运行指定秒数后打印指标并退出",
     )
     parser.add_argument(
+        "--sample-seconds",
+        type=float,
+        default=10.0,
+        help="采样心跳间隔秒数，默认 10；短窗口基线（如 30s 无手 gate）调小到 2",
+    )
+    parser.add_argument(
+        "--guided",
+        action="store_true",
+        help="引导式基线：按固定节拍打印 6 步操作提示（隐含 --auto-control），"
+        "未指定 --diagnostic-seconds 时自动在脚本结束后输出诊断并退出",
+    )
+    parser.add_argument(
         "--list-bindings",
         action="store_true",
         help="打印当前轨迹动作绑定与 LAUNCH 白名单后退出",
@@ -124,6 +136,11 @@ def _print_bindings(config: AppConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 输出被重定向到日志文件时，stdout 会被 Python 改成块缓冲：
+    # 环境指纹和 10s 采样心跳会卡在缓冲区里直到进程退出，"当场可读"就没有了。
+    # logging 走 stderr（无缓冲）所以 `[状态]` 行一直正常，这里补齐 stdout。
+    sys.stdout.reconfigure(line_buffering=True)
+
     args = _arguments(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -136,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_bindings:
         _print_bindings(config)
         return 0
+
+    if args.guided:
+        steps = guided.build_steps()
+        if args.diagnostic_seconds <= 0:
+            # 脚本播完后留 2s 让最后一帧指标落盘，再自动输出诊断退出。
+            args.diagnostic_seconds = guided.total_seconds(steps) + 2.0
+        print(f"[引导] 共 {len(steps)} 个节拍，约 {guided.total_seconds(steps):.0f} 秒；"
+              "请只跟随 [步骤] 提示操作，中途不要碰键盘。")
 
     screen_map = ScreenMap(
         multi_monitor=config.multi_monitor,
@@ -181,23 +206,26 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     state.started = True
-    engine_started_paused = not args.auto_control
+    # 引导模式必须处于接管态，否则引擎只报 paused，看不到 pointer/lost 迁移。
+    engine_started_paused = not args.auto_control and not args.guided
     if engine_started_paused:
         pipeline.set_paused(True)
         print("默认未接管鼠标：按 M 或 Ctrl+Alt+G 开始接管。")
+    if args.guided:
+        guided.start_prompter(pipeline.stop_event)
 
     scale = system_dpi_scale()
     deadline = (
         time.monotonic() + args.diagnostic_seconds if args.diagnostic_seconds > 0 else None
     )
-    next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+    next_heartbeat = time.monotonic() + max(1.0, args.sample_seconds)
     exit_code = 0
     try:
         while not state.quit:
             _apply_pending_hotkeys(state, pipeline)
             if time.monotonic() >= next_heartbeat:
                 _print_heartbeat(pipeline.snapshot())
-                next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
+                next_heartbeat = time.monotonic() + max(1.0, args.sample_seconds)
             frame_packet, detection = pipeline.get_preview()
             if frame_packet is None:
                 time.sleep(0.01)
@@ -264,9 +292,6 @@ def _handle_key(
     return True
 
 
-HEARTBEAT_SECONDS = 10.0
-
-
 def _environment_line(config: AppConfig, safe_mode: bool) -> str:
     """环境指纹：多轮验证靠它确认"同一环境"，并把日志绑到具体的 commit 与配置。
 
@@ -303,9 +328,14 @@ def _environment_line(config: AppConfig, safe_mode: bool) -> str:
 
 def _metrics_text(snapshot) -> str:
     metrics = snapshot.metrics
+    run_rate = (
+        100.0 * metrics.hand_packets_total / metrics.packets_total
+        if metrics.packets_total
+        else 0.0
+    )
     return (
         "capture_fps=%.1f inference_fps=%.1f latency_ms=%.1f latency_p50_ms=%.1f "
-        "latency_p95_ms=%.1f hand_detection_rate=%.1f dropped_frames=%d "
+        "latency_p95_ms=%.1f hand_rate_3s=%.1f hand_rate_run=%.1f dropped_frames=%d "
         "cpu_percent=%.1f memory_mb=%.1f error=%s"
         % (
             metrics.capture_fps,
@@ -314,6 +344,7 @@ def _metrics_text(snapshot) -> str:
             metrics.latency_p50_ms,
             metrics.latency_p95_ms,
             metrics.hand_detection_rate,
+            run_rate,
             metrics.dropped_frames,
             metrics.cpu_percent,
             metrics.memory_mb,

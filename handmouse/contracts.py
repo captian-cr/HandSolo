@@ -164,6 +164,10 @@ class RuntimeMetrics:
     captured_frames: int = 0
     inferred_frames: int = 0
     hand_detection_rate: float = 0.0
+    # 全程累计（自 start() 起）：基线判定用。hand_detection_rate 只是 3s 滚动窗，
+    # 单独看它会被"最后几秒刚好没手"骗过。
+    packets_total: int = 0
+    hand_packets_total: int = 0
     handedness_score: float = 0.0
     palm_width_percent: float = 0.0
 
