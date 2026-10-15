@@ -329,7 +329,7 @@ def _environment_line(config: AppConfig, safe_mode: bool) -> str:
     except (OSError, subprocess.SubprocessError):
         commit = "none"  # 冻结成 EXE 后没有 git，不影响运行
     return (
-        f"[环境] commit={commit} config_sha256={digest} "
+        f"[环境] commit={commit}{_worktree_mark()} config_sha256={digest} "
         f"camera={config.camera_index}@{config.camera_width}x{config.camera_height}"
         f"@{config.camera_fps}fps mirror={config.mirror} "
         f"det={config.min_detection_confidence} pres={config.min_presence_confidence} "
@@ -337,6 +337,29 @@ def _environment_line(config: AppConfig, safe_mode: bool) -> str:
         f"motion={config.motion_gestures_enabled} snap={config.cursor_snap_enabled} "
         f"safe={safe_mode}"
     )
+
+
+def _worktree_mark() -> str:
+    """工作区有未提交改动时打 ``+dirty``，避免"假指纹"。
+
+    commit 只说明 HEAD 是谁，不代表跑的代码就是它——r1→r2 之间有人在未提交的
+    工作区里改了阈值和检测逻辑，两轮日志却都写着同一个 commit，导致不可比。
+    这里把工作区状态一起写进指纹行。
+    """
+
+    try:
+        result = subprocess.run(
+            # 只看已跟踪文件：logs/ 里每次运行都会生成新日志，若算进去标记会一直亮。
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""  # 冻结成 EXE 后没有 git
+    return "+dirty" if result.stdout.strip() else ""
 
 
 def _metrics_text(snapshot) -> str:
