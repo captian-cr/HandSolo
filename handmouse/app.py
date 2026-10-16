@@ -219,8 +219,9 @@ def main(argv: list[str] | None = None) -> int:
             print("[符号参照] 未检测到 HANDMOUSE_SIGN_REF=1：几何日志仍会写，"
                   "但 [sign-ref] cross/sin 参照行不会输出。请以 HANDMOUSE_SIGN_REF=1 启动。")
         print(f"[符号参照] 共 4 姿势（每段保持 5s）+ 3 个 2s 换姿势间隙 = {total:.0f}s，safe-mode 已开启。"
-              "先过取景预检，随后按提示操作：保持段摆好姿势后不动 5s，"
-              "间隙里把翻手/换手做完再进入下一段（可出画再回来）。")
+              "先过取景预检，随后按提示操作：保持段摆好姿势后不动 5s；"
+              "间隙务必按顺序——先完全出画、在画外停半秒（等引擎 lost 关闸），"
+              "在画外翻完手/换完手、摆好新姿势后再举回画面，举回后不要再翻。")
 
     # safe_mode 在 gate-diag/sign-ref 强制 safe 之后才定格，故放在这里而非更早。
     safe_mode = bool(args.safe_mode) or sys.platform != "win32"
