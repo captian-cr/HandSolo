@@ -461,11 +461,11 @@ class HandLandmarkerWorker(threading.Thread):
             handedness_score = float(category.score) if category else 0.0
 
             # 脸 bbox overlap 过滤：先用 HandLandmarker 原始坐标（zoom 后）
-            # 算 bbox，和 Haar Cascade 的脸 bbox 比 IoU。重叠 > 30% 就丢弃。
+            # 算 bbox，和 Haar Cascade 的脸 bbox 比 IoU。重叠 > 50% 才丢弃。
             if len(hand_points) == 21 and face_bboxes_norm:
                 hand_bbox = _hand_bbox(hand_points)
                 max_iou = max((_bbox_iou(hand_bbox, fb) for fb in face_bboxes_norm), default=0.0)
-                if max_iou > 0.30:
+                if max_iou > 0.50:
                     LOGGER.info(
                         "[脸过滤] 丢弃疑似误检 IoU=%.2f handedness=%s score=%.2f",
                         max_iou, handedness, handedness_score,
