@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -86,6 +87,173 @@ def build_gate_diag_steps() -> list[tuple[float, str]]:
 
 def total_seconds(steps: list[tuple[float, str]]) -> float:
     return sum(duration for duration, _prompt in steps)
+
+
+# gate-diag 状态机阶段。
+_GATE_PRECHECK = "precheck"
+_GATE_RUNNING = "running"
+_GATE_DONE = "done"
+_GATE_ABORTED = "aborted"
+
+
+@dataclass(frozen=True, slots=True)
+class GateDiagEvent:
+    """状态机向主循环发出的事件；``line`` 即打到 stdout 的整行。"""
+
+    kind: str  # precheck_pass | step | abort | done
+    line: str
+
+
+class GateDiagController:
+    """gate-diag 的取景预检、seg1 自动中止与节拍驱动（纯逻辑，时钟注入）。
+
+    前两轮 gate-diag 的失败都不是模型问题：第二轮镜头对着灰墙（std≈15），
+    22 秒零检出盲跑全程。预检段**不计时**：连续 ``PRECHECK_REQUIRED_FRAMES``
+    帧 hand_count==1 且 palm_width ≥ ``PRECHECK_MIN_PALM_WIDTH`` 才放行进
+    seg1，取景/人位稳定后再启动 30s 序列。
+
+    seg1 起 ``SEG1_ABORT_SECONDS`` 内两道自动中止（不用等整段跑完）：
+      * 连续 ``EARLY_BAD_FRAMES`` 帧 hand_count==0 且 std<``ABORT_STD_MAX``
+        （灰墙早退，约 1s 即可判定）；
+      * 窗口结束时 hand_count 全程为 0，或 std 过低帧占比过半。
+    """
+
+    PRECHECK_REQUIRED_FRAMES = 30
+    PRECHECK_MIN_PALM_WIDTH = 0.15
+    SEG1_ABORT_SECONDS = 3.0
+    ABORT_STD_MAX = 20.0
+    EARLY_BAD_FRAMES = 30
+    LOW_STD_FRACTION = 0.5
+
+    def __init__(self, steps: list[tuple[float, str]]) -> None:
+        self.steps = steps
+        self.phase = _GATE_PRECHECK
+        self.abort_reason = ""
+        self._streak = 0
+        self._run_start: float | None = None
+        self._step_index = 0
+        self._next_step_at = 0.0
+        self._seg1_samples = 0
+        self._seg1_hand_frames = 0
+        self._seg1_low_std_frames = 0
+        self._seg1_bad_streak = 0
+        self._seg1_evaluated = False
+        self.last_hand_count = 0
+        self.last_palm_width = 0.0
+        self.last_std = 0.0
+
+    def observe(
+        self, now: float, hand_count: int, palm_width: float, frame_std: float
+    ) -> list[GateDiagEvent]:
+        """喂入一帧的取景指标，返回本帧产生的事件（可能为空）。"""
+
+        self.last_hand_count = int(hand_count)
+        self.last_palm_width = float(palm_width)
+        self.last_std = float(frame_std)
+        if self.phase == _GATE_PRECHECK:
+            return self._observe_precheck(now)
+        if self.phase == _GATE_RUNNING:
+            return self._observe_running(now)
+        return []
+
+    def _observe_precheck(self, now: float) -> list[GateDiagEvent]:
+        good = (
+            self.last_hand_count == 1
+            and self.last_palm_width >= self.PRECHECK_MIN_PALM_WIDTH
+        )
+        self._streak = self._streak + 1 if good else 0
+        if self._streak < self.PRECHECK_REQUIRED_FRAMES:
+            return []
+        self.phase = _GATE_RUNNING
+        self._run_start = now
+        self._step_index = 0
+        self._next_step_at = now + self.steps[0][0]
+        return [
+            GateDiagEvent("precheck_pass", "[预检通过] 取景有效，seg1 开始。"),
+            self._step_event(1),
+        ]
+
+    def _observe_running(self, now: float) -> list[GateDiagEvent]:
+        assert self._run_start is not None
+        events = self._seg1_guard(now - self._run_start)
+        if self.phase == _GATE_ABORTED:
+            return events
+        while now >= self._next_step_at:
+            self._step_index += 1
+            if self._step_index >= len(self.steps):
+                self.phase = _GATE_DONE
+                events.append(GateDiagEvent("done", "[完成] 全部定点段结束，等待诊断输出。"))
+                return events
+            events.append(self._step_event(self._step_index + 1))
+            self._next_step_at += self.steps[self._step_index][0]
+        return events
+
+    def _seg1_guard(self, elapsed: float) -> list[GateDiagEvent]:
+        if self._seg1_evaluated:
+            return []
+        self._seg1_samples += 1
+        if self.last_hand_count >= 1:
+            self._seg1_hand_frames += 1
+        if self.last_std < self.ABORT_STD_MAX:
+            self._seg1_low_std_frames += 1
+        bad = self.last_hand_count == 0 and self.last_std < self.ABORT_STD_MAX
+        self._seg1_bad_streak = self._seg1_bad_streak + 1 if bad else 0
+        if self._seg1_bad_streak >= self.EARLY_BAD_FRAMES:
+            return self._abort(
+                f"seg1 连续 {self.EARLY_BAD_FRAMES} 帧无手且画面无纹理"
+                f"(std<{self.ABORT_STD_MAX:g})"
+            )
+        if elapsed < self.SEG1_ABORT_SECONDS:
+            return []
+        self._seg1_evaluated = True
+        if self._seg1_hand_frames == 0:
+            return self._abort(
+                f"seg1 前 {self.SEG1_ABORT_SECONDS:g}s hand_count 全程为 0"
+            )
+        low_fraction = self._seg1_low_std_frames / max(1, self._seg1_samples)
+        if low_fraction > self.LOW_STD_FRACTION:
+            return self._abort(
+                f"seg1 前 {self.SEG1_ABORT_SECONDS:g}s 画面 std<{self.ABORT_STD_MAX:g} "
+                f"占比 {low_fraction:.0%}，取景无纹理"
+            )
+        return []
+
+    def _abort(self, reason: str) -> list[GateDiagEvent]:
+        self.phase = _GATE_ABORTED
+        self.abort_reason = reason
+        return [GateDiagEvent("abort", f"[中止] 取景无效：{reason}，退出。")]
+
+    def _step_event(self, one_based: int) -> GateDiagEvent:
+        _duration, prompt = self.steps[one_based - 1]
+        return GateDiagEvent(
+            "step",
+            f"[步骤] {time.strftime('%H:%M:%S')} ({one_based}/{len(self.steps)}) {prompt}",
+        )
+
+    def hud_text(self) -> str:
+        """调试窗 HUD 的实时提示行。"""
+
+        if self.phase == _GATE_PRECHECK:
+            return (
+                f"[预检 {self._streak}/{self.PRECHECK_REQUIRED_FRAMES}] "
+                f"手放画面中央、靠近镜头  hand={self.last_hand_count} "
+                f"palm={self.last_palm_width:.2f}"
+                f"(>={self.PRECHECK_MIN_PALM_WIDTH:.2f}) std={self.last_std:.0f}"
+            )
+        if self.phase == _GATE_ABORTED:
+            return f"[中止] {self.abort_reason}"
+        if self.phase == _GATE_DONE:
+            return "[完成] 定点结束，等待诊断输出"
+        return (
+            f"[gate-diag {self._step_index + 1}/{len(self.steps)}] "
+            f"按提示保持姿势，手不要动"
+        )
+
+    @property
+    def hud_alert(self) -> bool:
+        """True 时 HUD 用警示色（预检中/已中止）。"""
+
+        return self.phase in (_GATE_PRECHECK, _GATE_ABORTED)
 
 
 def start_prompter(

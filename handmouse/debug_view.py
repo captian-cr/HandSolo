@@ -126,8 +126,13 @@ def build_view(
     screen_map: ScreenMap,
     config,
     pinch_ratio: float | None = None,
+    banner: tuple[str, tuple[int, int, int]] | None = None,
 ) -> np.ndarray:
-    """在采集帧上叠加所有调试信息，返回可直接 imshow 的画面。"""
+    """在采集帧上叠加所有调试信息，返回可直接 imshow 的画面。
+
+    ``banner`` 是可选的首行强提示（gate-diag 预检/中止用），渲染在常规
+    HUD 行之前，颜色由调用方给定。
+    """
 
     view = frame.copy()
     if detection and detection.observations:
@@ -156,6 +161,8 @@ def build_view(
         (f"磁吸 {snapshot.snap_target_name or '--'}   {screen_map.describe()}", GRAY),
         ("M 暂停/恢复(接管)  S 安全模式数据  Ctrl+Alt+Esc 急停  ESC/Q 退出", GRAY),
     ]
+    if banner is not None:
+        rows.insert(0, banner)
     draw_hud(view, rows)
     return view
 

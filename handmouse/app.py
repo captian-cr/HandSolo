@@ -126,6 +126,21 @@ def _pinch_ratio(detection) -> float | None:
     return hypot(points[4].x - points[8].x, points[4].y - points[8].y) / palm_width
 
 
+def _first_palm_width(detection) -> float:
+    """第一只手的掌宽（landmark 5→17），供 gate-diag 预检判断手是否够近。
+
+    定义与引擎进入门一致（x 方向归一化间距，见 gestures._palm_width），
+    这样 HUD 预检值与诊断日志 geom 行、ENTRY_PALM_WIDTH_MIN 直接可比。
+    """
+
+    if detection is None or not detection.observations:
+        return 0.0
+    points = detection.observations[0].landmarks
+    if len(points) != 21:
+        return 0.0
+    return abs(points[17].x - points[5].x)
+
+
 def main(argv: list[str] | None = None) -> int:
     # 输出被重定向到日志文件时，stdout 会被 Python 改成块缓冲：
     # 环境指纹和 10s 采样心跳会卡在缓冲区里直到进程退出，"当场可读"就没有了。
@@ -166,7 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         args.diagnostic_seconds = 30.0
         args.safe_mode = True
         print(f"[进入门诊断] 共 {len(gate_diag_steps)} 段 × 5s = 30s，safe-mode 已开启。"
-              "请严格按 [步骤] 提示操作。")
+              "先过取景预检（连续 30 帧检到手且 palm_width≥0.15）才开始计时，"
+              "请按调试窗 [预检] 提示把手放到画面中央、靠近镜头。")
 
     if args.guided:
         steps = guided.build_steps()
@@ -228,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     if engine_started_paused:
         pipeline.set_paused(True)
         print("默认未接管鼠标：按 M 或 Ctrl+Alt+G 开始接管。")
+    gate_diag: guided.GateDiagController | None = None
     if args.guided:
         # 第 25 步（H5' 引擎级降级恢复）：自动暂停 3 秒后恢复，不碰相机硬件。
         # 暂停期间应无注入；恢复后手回画面应能重新进入操控态。
@@ -247,19 +264,16 @@ def main(argv: list[str] | None = None) -> int:
             step_actions={25: _step25_pause_resume},
         )
     elif gate_diag_steps is not None:
-        # 复用 start_prompter 的逻辑：传 stop_event 和 steps 覆盖
-        import threading as _threading
-        def _run_gate_diag() -> None:
-            for index, (duration, prompt) in enumerate(gate_diag_steps, start=1):
-                if pipeline.stop_event.is_set():
-                    return
-                print(f"[步骤] {time.strftime('%H:%M:%S')} ({index}/{len(gate_diag_steps)}) {prompt}")
-                pipeline.stop_event.wait(duration)
-        _threading.Thread(target=_run_gate_diag, name="gate-diag-prompter", daemon=True).start()
+        # gate-diag 节拍不另起线程：预检/中止/分段都由主循环逐帧驱动
+        # GateDiagController（时钟注入、可单测），避免线程与取景状态脱节。
+        gate_diag = guided.GateDiagController(gate_diag_steps)
 
     scale = system_dpi_scale()
+    # gate-diag 的 deadline 在预检通过那一刻才起算（预检不计时）。
     deadline = (
-        time.monotonic() + args.diagnostic_seconds if args.diagnostic_seconds > 0 else None
+        time.monotonic() + args.diagnostic_seconds
+        if args.diagnostic_seconds > 0 and gate_diag is None
+        else None
     )
     next_heartbeat = time.monotonic() + max(1.0, args.sample_seconds)
     exit_code = 0
@@ -274,6 +288,33 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(0.01)
             else:
                 snapshot = pipeline.snapshot()
+                banner = None
+                if gate_diag is not None:
+                    hand_count = (
+                        len(detection.observations) if detection is not None else 0
+                    )
+                    aborted = False
+                    for event in gate_diag.observe(
+                        time.monotonic(),
+                        hand_count,
+                        _first_palm_width(detection),
+                        float(frame_packet.frame.std()),
+                    ):
+                        print(event.line)
+                        if event.kind == "precheck_pass":
+                            # 30s 序列 +2s 收尾后输出诊断退出；预检耗时不计入。
+                            deadline = (
+                                time.monotonic() + args.diagnostic_seconds + 2.0
+                            )
+                        elif event.kind == "abort":
+                            state.quit = True
+                            aborted = True
+                    if aborted:
+                        exit_code = 4
+                    banner = (
+                        gate_diag.hud_text(),
+                        debug_view.RED if gate_diag.hud_alert else debug_view.GREEN,
+                    )
                 view = debug_view.build_view(
                     frame_packet.frame,
                     snapshot,
@@ -281,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                     screen_map,
                     config,
                     _pinch_ratio(detection),
+                    banner=banner,
                 )
                 if recorder is not None:
                     recorder.capture(view)
