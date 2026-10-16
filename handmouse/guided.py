@@ -85,6 +85,28 @@ def build_gate_diag_steps() -> list[tuple[float, str]]:
     ]
 
 
+def build_sign_ref_steps() -> list[tuple[float, str]]:
+    """掌/背朝向符号参照：4 姿势 × 3s，采 ``(label, cross, sin)`` 参照样本。
+
+    动机：``expected_sign`` 的定性在两轮实测里打架（flip-diag 与 seg2 手背段
+    符号整体反相），在拿到**受控参照**前写任何 sign 逻辑都是拍脑袋。本序列把
+    左右手 × 掌/背四个姿势各固定 3s，配合 ``HANDMOUSE_SIGN_REF=1`` 逐帧打印
+    ``[sign-ref] cross/sin/label``，一轮 session 即可定死 blocker（换手 vs
+    MediaPipe 标签不稳）。
+
+    姿势定义只求"几何信息量高"（``sin`` ≥0.3 才用于定符号）：五指张开、掌面
+    正对镜头的掌/背，避免侧掌/半握这类几何退化帧。每段 3s，操作者只做一个
+    动作，减少变量。
+    """
+
+    return [
+        (3, "参照 1/4：右手，掌心朝镜（五指张开、正对镜头），保持不动 3s"),
+        (3, "参照 2/4：右手，手背朝镜（五指张开、正对镜头），保持不动 3s"),
+        (3, "参照 3/4：左手，掌心朝镜（五指张开、正对镜头），保持不动 3s"),
+        (3, "参照 4/4：左手，手背朝镜（五指张开、正对镜头），保持不动 3s"),
+    ]
+
+
 def total_seconds(steps: list[tuple[float, str]]) -> float:
     return sum(duration for duration, _prompt in steps)
 

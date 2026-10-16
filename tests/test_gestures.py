@@ -1,3 +1,4 @@
+import logging
 import pytest
 from math import sqrt
 
@@ -959,3 +960,31 @@ def test_pending_single_click_flushes_when_hand_lost() -> None:
 
     assert kinds(lost) == [MouseCommandType.LEFT_CLICK]
     assert engine.current_gesture.value == "lost"
+
+
+def test_sign_ref_is_log_only_switch(monkeypatch, caplog) -> None:
+    """参照模式是纯日志开关：开/关 SIGN_REF，判定与注入命令必须逐字一致。
+
+    参照开关的唯一职责是"让 frontal 不足时也照打 cross/sin"。若它在任何路径
+    上改动了 ``_palm_presented`` / gate / 注入，这条断言立刻变红——参照拿的是
+    数据，不能顺手改了判定的行为。
+    """
+
+    from handmouse import gestures as gestures_module
+
+    obs = observation(entry_palm_points(), BASE)
+
+    monkeypatch.setattr(gestures_module, "VERBOSE_GATE", False)
+    monkeypatch.setattr(gestures_module, "SIGN_REF", False)
+    off = GestureEngine(AppConfig()).process(obs)
+
+    monkeypatch.setattr(gestures_module, "SIGN_REF", True)
+    with caplog.at_level(logging.INFO, logger="handmouse.gate-diag"):
+        on = GestureEngine(AppConfig()).process(obs)
+
+    def signature(cmds):
+        return [(command.kind, command.x, command.y) for command in cmds]
+
+    assert signature(on) == signature(off)
+    # 开关确实生效：参照模式下打了 [sign-ref] 行，否则本测试是空跑、无牙。
+    assert any("[sign-ref]" in record.getMessage() for record in caplog.records)

@@ -96,6 +96,14 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "隐含 --diagnostic-seconds 30 和 --safe-mode。"
         "需同时设置环境变量 HANDMOUSE_VERBOSE_GATE=1 才能启用诊断日志。",
     )
+    parser.add_argument(
+        "--sign-ref",
+        action="store_true",
+        help="掌/背朝向符号参照：4 姿势（右手掌/右手背/左手掌/左手背）× 3s 定点序列，"
+        "采集 handedness/cross/sin 参照样本。隐含 --safe-mode。"
+        "需同时设置环境变量 HANDMOUSE_SIGN_REF=1 才会输出诊断日志"
+        "（该开关只加诊断日志、不改任何判定）。",
+    )
     return parser.parse_args(argv)
 
 
@@ -154,21 +162,28 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # 进入门诊断开关：环境变量控制，跨模块生效。
-    # 诊断日志走独立 FileHandler，不写进主日志。
+    # 参照模式开关（仅日志）：与 VERBOSE_GATE 共用一个 FileHandler，但用独立
+    # 文件名前缀归档，避免两轮相互覆盖。
     verbose_gate = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
-    if verbose_gate:
+    sign_ref = os.environ.get("HANDMOUSE_SIGN_REF", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    diag_logger: logging.Logger | None = None
+    if verbose_gate or sign_ref:
         diag_dir = PROJECT_ROOT / "logs"
         diag_dir.mkdir(parents=True, exist_ok=True)
-        diag_path = diag_dir / f"gate-diag-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        prefix = "sign-ref" if sign_ref else "gate-diag"
+        diag_path = diag_dir / f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}.log"
         diag_logger = logging.getLogger("handmouse.gate-diag")
         diag_logger.setLevel(logging.INFO)
         diag_logger.propagate = False
         handler = logging.FileHandler(str(diag_path), encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         diag_logger.addHandler(handler)
-        print(f"[诊断] HANDMOUSE_VERBOSE_GATE=1 已启用，诊断日志 → {diag_path}")
+        flag = "HANDMOUSE_SIGN_REF=1" if sign_ref else "HANDMOUSE_VERBOSE_GATE=1"
+        print(f"[诊断] {flag} 已启用，诊断日志 → {diag_path}")
 
     store = ConfigStore(args.config)
     config = _apply_cli_overrides(store.load(), args)
@@ -177,19 +192,33 @@ def main(argv: list[str] | None = None) -> int:
     # 诊断日志文件头。① 修复后 expected_sign 由 mirror×handedness 派生，逐帧
     # cross 行虽也带 mirror，但日志按轮单独命名归档、隔轮回看时需要一个必然
     # 存在的运行头，避免"这一轮跑的是哪种镜像约定"无法自证。
-    if verbose_gate and args.gate_diag:
+    if diag_logger is not None and args.gate_diag:
         diag_logger.info("%s", _gate_diag_run_header(config))
+    # sign-ref 启动头：同样钉死镜像约定，并显式声明"仅参照、不改判定"。
+    if diag_logger is not None and args.sign_ref:
+        diag_logger.info("%s", _sign_ref_run_header(config))
 
     recorder: guided.FrameRecorder | None = None
-    # gate-diag 模式：独立于完整 guided 的 30s 6 段姿势序列
-    gate_diag_steps: list[tuple[float, str]] | None = None
+    # 进入门定点序列：gate-diag（6 段×5s）与 sign-ref（4 姿势×3s）共用
+    # GateDiagController 的取景预检 + 节拍驱动，只是 steps 不同。
+    diag_steps: list[tuple[float, str]] | None = None
     if args.gate_diag:
-        gate_diag_steps = guided.build_gate_diag_steps()
+        diag_steps = guided.build_gate_diag_steps()
         args.diagnostic_seconds = 30.0
         args.safe_mode = True
-        print(f"[进入门诊断] 共 {len(gate_diag_steps)} 段 × 5s = 30s，safe-mode 已开启。"
+        print(f"[进入门诊断] 共 {len(diag_steps)} 段 × 5s = 30s，safe-mode 已开启。"
               "先过取景预检（连续 30 帧检到手且 palm_width≥0.15）才开始计时，"
               "请按调试窗 [预检] 提示把手放到画面中央、靠近镜头。")
+    elif args.sign_ref:
+        diag_steps = guided.build_sign_ref_steps()
+        total = guided.total_seconds(diag_steps)
+        args.diagnostic_seconds = total
+        args.safe_mode = True
+        if not sign_ref:
+            print("[符号参照] 未检测到 HANDMOUSE_SIGN_REF=1：几何日志仍会写，"
+                  "但 [sign-ref] cross/sin 参照行不会输出。请以 HANDMOUSE_SIGN_REF=1 启动。")
+        print(f"[符号参照] 共 {len(diag_steps)} 姿势 × 3s = {total:.0f}s，safe-mode 已开启。"
+              "先过取景预检，随后每个姿势按提示保持不动 3s（五指张开、掌面正对镜头）。")
 
     if args.guided:
         steps = guided.build_steps()
@@ -270,10 +299,10 @@ def main(argv: list[str] | None = None) -> int:
             on_step=lambda index, _prompt: recorder.request(f"步骤-{index:02d}"),
             step_actions={25: _step25_pause_resume},
         )
-    elif gate_diag_steps is not None:
-        # gate-diag 节拍不另起线程：预检/中止/分段都由主循环逐帧驱动
-        # GateDiagController（时钟注入、可单测），避免线程与取景状态脱节。
-        gate_diag = guided.GateDiagController(gate_diag_steps)
+    elif diag_steps is not None:
+        # gate-diag / sign-ref 节拍不另起线程：预检/中止/分段都由主循环逐帧
+        # 驱动 GateDiagController（时钟注入、可单测），避免线程与取景状态脱节。
+        gate_diag = guided.GateDiagController(diag_steps)
 
     scale = system_dpi_scale()
     # gate-diag 的 deadline 在预检通过那一刻才起算（预检不计时）。
@@ -454,6 +483,21 @@ def _gate_diag_run_header(config: AppConfig) -> str:
         f"[gate-diag运行头] mirror={config.mirror} "
         f"entry_palm_sin_min={config.entry_palm_sin_min:.2f} "
         "(expected_sign 由 mirror×handedness 派生)"
+    )
+
+
+def _sign_ref_run_header(config: AppConfig) -> str:
+    """sign-ref 诊断日志的运行头：钉死镜像约定，并声明本模式不改判定。
+
+    参照行（``[sign-ref] cross/sin``）与 gate-diag 的 ``cross`` 行同源，隔轮
+    回看时必须能从文件头自证"这一轮跑的是哪种镜像约定"。同时显式写明本模式
+    只加日志、不改判定，避免将来考古把它误读成判定逻辑。
+    """
+
+    return (
+        f"[sign-ref运行头] mirror={config.mirror} "
+        f"entry_palm_sin_min={config.entry_palm_sin_min:.2f} "
+        "（仅参照模式：只加诊断日志、不改任何判定）"
     )
 
 

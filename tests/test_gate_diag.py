@@ -3,7 +3,20 @@
 时钟全部由 ``now`` 注入，测试不依赖相机/线程/真实时间。
 """
 
-from handmouse.guided import GateDiagController
+from handmouse.guided import GateDiagController, build_sign_ref_steps, total_seconds
+
+
+def test_build_sign_ref_steps_shape():
+    """参照序列：4 姿势保持段 × 3s，总 12s。"""
+
+    steps = build_sign_ref_steps()
+    holds = [s for s in steps if s[1].startswith("参照")]
+    assert len(holds) == 4
+    assert all(duration == 3 for duration, _prompt in holds)
+    assert total_seconds(steps) == 12
+    prompts = " ".join(prompt for _duration, prompt in steps)
+    for pose in ("右手", "左手", "掌心", "手背"):
+        assert pose in prompts
 
 
 def _steps(n: int = 6, dur: float = 5.0) -> list[tuple[float, str]]:

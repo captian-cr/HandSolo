@@ -157,6 +157,37 @@ def _palm_axis_cross(points: tuple[Landmark, ...]) -> tuple[float, float]:
     return cross, abs(cross) / (across_len * thumb_len)
 
 
+def _log_sign_ref_cross(
+    points: tuple[Landmark, ...],
+    handedness: str,
+    hn_valid: bool,
+    frontal_ratio: float,
+    mirror: bool,
+    sin_min: float,
+) -> None:
+    """【仅参照模式】无条件输出掌轴×拇指叉积与 sin，供掌/背四姿势采符号参照。
+
+    ``HANDMOUSE_SIGN_REF=1`` 时用它替代常规 ``cross/(skip)`` 行：即使
+    ``frontal_ratio`` 不足也照算照打，免得手背/侧掌那组拿不到符号。
+    **纯日志**——不返回、不写状态；判定链（``_palm_presented`` /
+    ``gate_eligible`` / gate / 注入）在上面早已算完，本函数一行都不碰。
+    整块独立，删除即干净 revert。
+    """
+
+    if not hn_valid:
+        _DIAG_LOGGER.info(
+            "  [sign-ref] cross=N/A hn=%s frontal=%.4f（无有效手别）",
+            handedness or '""', frontal_ratio,
+        )
+        return
+    cross, sin_theta = _palm_axis_cross(points)
+    _DIAG_LOGGER.info(
+        "  [sign-ref] cross=%.6f sin=%.3f(min=%.2f) hn=%s frontal=%.4f mirror=%s"
+        "（仅参照模式，不影响判定）",
+        cross, sin_theta, sin_min, handedness, frontal_ratio, mirror,
+    )
+
+
 def _palm_presented(
     points: tuple[Landmark, ...],
     handedness: str,
@@ -207,6 +238,12 @@ def _palm_presented(
 
 # 进入门诊断开关：环境变量控制，跨模块生效。
 VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# 参照模式开关（HANDMOUSE_SIGN_REF）：**默认关、环境变量控制、不进 config**，
+# 避免被持久化进 config.json 或误进生产。唯一作用：诊断日志在 frontal 不足时
+# 也照打 cross/sin（供掌/背四姿势采符号参照）。**纯日志开关**，不改任何判定。
+SIGN_REF = os.environ.get("HANDMOUSE_SIGN_REF", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
 _DIAG_LOGGER = logging.getLogger("handmouse.gate-diag")
@@ -487,7 +524,8 @@ class GestureEngine:
         # -------- 进入门诊断：几何判定层 --------
         # 限流：每 5 帧（~6Hz）+ gate_eligible/palm_presented/five_open 任一变 True 时立即打。
         # 相同内容去重用 signature。所有新计算都包在 if VERBOSE_GATE 内。
-        if VERBOSE_GATE:
+        # VERBOSE_GATE 或 SIGN_REF 任一开启都进诊断块（SIGN_REF 专用于四姿势参照）。
+        if VERBOSE_GATE or SIGN_REF:
             self._gate_diag_frame += 1
             # 到达时刻戳：与本帧 last_hand_ns 同源（同一个 arrival_ns），
             # 因此 elapsed 拆分里的 dwell 段在笔1后恒为 0。
@@ -539,7 +577,11 @@ class GestureEngine:
                 )
 
                 # 立即打条件：任一关键布尔量变 True
-                if sig != self._gate_diag_last_sig:
+                # 【仅参照模式】每帧无条件打，便于统计 label 分布与符号翻转；
+                # 常规模式维持原限流。
+                if SIGN_REF:
+                    should_log = True
+                elif sig != self._gate_diag_last_sig:
                     should_log = True
                 elif self._gate_diag_frame % 5 == 0:
                     should_log = True
@@ -584,7 +626,15 @@ class GestureEngine:
                         _distance_2d(points[4], points[17]) / palm_w,
                         _ENTRY_THUMB_SPREAD_MIN, five_open,
                     )
-                    if hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
+                    if SIGN_REF:
+                        # 【仅参照模式】无条件打 cross/sin，替代常规 cross/(skip)。
+                        # 上面的判定（palm_presented/gate_eligible/gate/注入）已算完，
+                        # 本分支只换日志输出，不改任何判定结果。整块可一键删除 revert。
+                        _log_sign_ref_cross(
+                            points, hn, hn_valid, palm_frontal_ratio,
+                            self.config.mirror, self.config.entry_palm_sin_min,
+                        )
+                    elif hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
                         _DIAG_LOGGER.info(
                             "  cross=%.6f sin=%.3f(min=%.2f) mirror=%s expected_sign=%s "
                             "cross_match=%s → gate_eligible=%s",
