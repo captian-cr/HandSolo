@@ -372,14 +372,26 @@ class GestureEngine:
         nz_unit: float,
         commit_min: float,
         k: int,
+        in_hold: bool = False,
     ) -> float | None:
         """符号锁存：返回当前已锁定的朝向符号(+1/-1)；尚无锁定时返回 None。
 
-        机制 = |nz| 参与门 + K 帧确认：
+        机制 = |nz| 参与门 + **两段式**确认：
           * 冷启动：首个 |nz| ≥ entry_palm_nz_min 的帧**立即采纳**其符号、免 K。
             否则"进入门 300ms + K 帧 ≈ 1.2s"会拖慢开闸，等于引入新 bug；
-          * 已锁定：只有 |nz| ≥ commit_min 的帧才有资格改变符号，且需连续 K
-            帧同号；|nz| < commit_min 的帧冻结候选（清零），不参与切换。
+          * **hold 期**（``in_hold=True``，进入计时正在累积）：过 commit 门的
+            错号帧**立即翻号、免 K**。hold 期的防抖由 entry_hold_ms 本身提供
+            ——presented 一旦翻 False，进入计时立即清零重计，错号不可能靠
+            "锁存翻号慢于 300ms"把闸门顶开（H4 竞速：K=8≈0.94s > hold=300ms，
+            冷启动锁错过渡帧后闸门会先于锁存打开）；
+          * **非 hold 期**（闸门未开、进入计时未在累积）：维持原 K 帧迟滞，
+            只有 |nz| ≥ commit_min 的帧连续 K 帧同号才改符号，压换手/翻手的
+            过渡块；|nz| < commit_min 的帧冻结候选（清零）。
+
+        ``in_hold`` 取求值前的 ``_entry_started_ns is not None`` 且本帧五指张开：
+        进入计时在 presented 求值之后才更新，故进入 attempt 的第一帧（计时此刻才
+        置位）仍走 K 分支；冷启动 locked=None 首帧本就免 K，行为不变。五指不张开
+        的 pose-break 帧不给快路径，只让进入计时重置、不翻锁存。
 
         迟滞的意义：|nz| 落在 [min, commit) 的帧"看得清（进得去）但不够格改变
         朝向判定"。实测右手背换手过渡块 |nz|≈0.46~0.56 正卡在此区间，被 commit
@@ -403,6 +415,14 @@ class GestureEngine:
             self._candidate_count = 0
             return self._locked_facing
 
+        # hold 期立即跟随：防抖由 entry_hold_ms 承担，不能让 K 帧确认（≈0.94s）
+        # 与 300ms 进入计时竞速——冷启动锁错过渡帧时，竞速必输（H4 实机漏检）。
+        if in_hold:
+            self._locked_facing = sign
+            self._candidate_facing = None
+            self._candidate_count = 0
+            return self._locked_facing
+
         if sign == self._candidate_facing:
             self._candidate_count += 1
         else:
@@ -419,14 +439,16 @@ class GestureEngine:
         self,
         points: tuple[Landmark, ...],
         expected_sign: float,
+        in_hold: bool = False,
     ) -> bool:
         """掌心朝镜且掌面基本正对镜头（排除侧掌与手背朝镜）。
 
         判据 = 非侧掌 + **锁存符号**等于期望符号 + |nz| 过进入门：
           1) 侧掌排除：掌宽/腕-中指指尖 < _ENTRY_PALM_FRONTAL_MIN；
-          2) 符号判定走符号锁存 ``_facing_committed``（**先更新锁存**）：只有过
-             commit 门的帧连续 K 帧同号才能改变已锁定符号，压掉换手/翻手的
-             过渡块（lag 块）；
+          2) 符号判定走符号锁存 ``_facing_committed``（**先更新锁存**）。锁存分
+             两段：``in_hold``（进入计时累积中）时过 commit 门即立即翻号，防抖
+             交给 entry_hold_ms（presented 翻 False 计时清零）；非 hold 期才要求
+             连续 K 帧同号，压掉换手/翻手的过渡块（lag 块）；
           3) |nz| < entry_palm_nz_min 的几何退化帧直接判 False。锁存**先于**
              本门更新，故退化帧会走 ``<commit`` 分支清零候选——"连续 K 帧"因此
              是严格的，不会被退化帧隔断后跨谷累加。
@@ -451,6 +473,7 @@ class GestureEngine:
             nz,
             commit_min=self.config.entry_palm_nz_commit,
             k=self.config.entry_facing_commit_frames,
+            in_hold=in_hold,
         )
         if abs(nz) < self.config.entry_palm_nz_min:
             return False
@@ -631,7 +654,17 @@ class GestureEngine:
         entry_nz = _palm_facing_unit(points) if len(points) == 21 else 0.0
         entry_palm_presented = False
         if not self._gate_active and len(points) == 21:
-            entry_palm_presented = self._palm_presented(points, entry_expected)
+            # in_hold = 进入计时已在累积（读上一帧留下的 _entry_started_ns，它在
+            # 本帧更下方的进入门块才更新）**且本帧仍五指张开**。hold 期符号立即
+            # 跟随、不做 K 帧确认，避免"冷启动锁错过渡帧 → K≈0.94s 翻不过号 →
+            # hold=300ms 先到 → 手背顶开闸门"的竞速（H4）。等价于 held_ms <
+            # entry_hold_ms：计时一旦到点本帧即开闸并清空 _entry_started_ns，其
+            # 存活期间恒在 hold。必须叠加 five_open：pose-break 帧（五指不张开）
+            # 只应重置进入计时，不该借 hold 快路径翻掉朝向锁存、污染下一次进入。
+            in_hold = self._entry_started_ns is not None and entry_five_open
+            entry_palm_presented = self._palm_presented(
+                points, entry_expected, in_hold=in_hold,
+            )
 
         # -------- 进入门诊断：几何判定层 --------
         # 限流：每 5 帧（~6Hz）+ gate_eligible/palm_presented/five_open 任一变 True 时立即打。

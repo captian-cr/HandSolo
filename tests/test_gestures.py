@@ -800,12 +800,14 @@ def _presented(
     nz_value: float,
     handedness: str = "Left",
     mirror: bool = True,
+    in_hold: bool = False,
 ) -> bool:
     """用单帧 ``_palm_landmarks`` 驱动 ``_palm_presented``（可复用同一引擎）。"""
 
     return engine._palm_presented(
         _palm_landmarks(nz_value=nz_value),
         _expected_palm_sign(handedness, mirror),
+        in_hold=in_hold,
     )
 
 
@@ -957,6 +959,61 @@ def test_facing_lock_requires_strictly_consecutive_frames() -> None:
 
     assert engine._locked_facing == +1.0
     assert engine._candidate_count == 0
+
+
+def test_facing_lock_follows_sign_immediately_during_hold() -> None:
+    """hold 期：单帧过 commit 的错号立即翻号、免 K（防抖交给 entry_hold_ms）。"""
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True          # 冷启动锁 +1
+    assert engine._locked_facing == +1.0
+
+    # 非 hold 期维持 K 迟滞：1 帧错号不翻。
+    assert _presented(engine, -0.90, in_hold=False) is True
+    assert engine._locked_facing == +1.0
+    assert engine._candidate_count == 1
+
+    # hold 期：同样一帧过 commit 的错号立即翻号，候选清零。
+    assert _presented(engine, -0.90, in_hold=True) is False
+    assert engine._locked_facing == -1.0
+    assert engine._candidate_count == 0
+
+
+def test_entry_gate_does_not_open_when_sign_flips_during_hold() -> None:
+    """H4 竞速回归：冷启动锁错符号后，hold 内翻成手背不得在 300ms 顶开闸门。
+
+    实机 sign-ref 20261016-1708 复现序列：手出画后回画首帧仍在翻手过渡态，
+    冷启动首帧免 K 锁了错号；随后连续手背高置信帧在 K=8（≈0.94s）内来不及
+    翻号，而 entry_hold_ms=300ms 先到——闸门比锁存先动，手背朝镜进了控制态
+    （seg2 gate_active=2，硬条件 FAIL）。
+
+    修法：hold 计时累积期间（entry_started_ns 已置位）符号立即跟随，防抖由
+    entry_hold_ms 本身提供（presented 一旦翻 False 计时清零）；非 hold 期才
+    走 K=8。本测试用 entry_palm（nz≈-1，匹配期望 -1）冷启动锁号，第二帧起
+    改喂 entry_back（nz≈+1，错号），350ms 内闸门必须始终不开。
+    """
+
+    engine = GestureEngine(
+        AppConfig(entry_gate_enabled=True, entry_hold_ms=300),
+    )
+
+    # t=0：回画首帧（掌心）→ 冷启动免 K 立即锁 -1，presented=True，hold 开始。
+    assert engine.process(observation(entry_palm_points(), BASE)) == []
+    assert engine._entry_started_ns == BASE
+    assert engine._gate_active is False
+
+    # t=100/200ms：已翻成手背（连续高置信错号帧）。hold 期符号立即跟随 →
+    # presented 翻 False、entry 计时清零；闸门继续关着。
+    engine.process(observation(entry_back_points(), BASE + 100_000_000))
+    assert engine._gate_active is False
+    assert engine.current_gesture.value == "gate_idle"
+    engine.process(observation(entry_back_points(), BASE + 200_000_000))
+    assert engine._gate_active is False
+
+    # t=350ms：旧实现这里 held_ms≥300 直接开闸（H4 漏检）；修复后必须仍在门外。
+    engine.process(observation(entry_back_points(), BASE + 350_000_000))
+    assert engine._gate_active is False
+    assert engine.current_gesture.value == "gate_idle"
 
 
 def test_double_pinch_fires_double_click_without_early_single() -> None:
