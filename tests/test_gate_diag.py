@@ -7,7 +7,7 @@ from handmouse.guided import GateDiagController, build_sign_ref_steps, total_sec
 
 
 def test_build_sign_ref_steps_shape():
-    """参照序列：4 姿势保持段 × 5s + 3 个 2s 换姿势间隙，总 26s。"""
+    """参照序列：4 姿势保持段 × 5s + 3 个 4s 换姿势间隙，总 32s。"""
 
     steps = build_sign_ref_steps()
     holds = [s for s in steps if s[1].startswith("参照")]
@@ -15,8 +15,8 @@ def test_build_sign_ref_steps_shape():
     assert len(holds) == 4
     assert all(duration == 5 for duration, _prompt in holds)
     assert len(gaps) == 3
-    assert all(duration == 2 for duration, _prompt in gaps)
-    assert total_seconds(steps) == 26
+    assert all(duration == 4 for duration, _prompt in gaps)
+    assert total_seconds(steps) == 32
     prompts = " ".join(prompt for _duration, prompt in steps)
     for pose in ("右手", "左手", "掌心", "手背"):
         assert pose in prompts
