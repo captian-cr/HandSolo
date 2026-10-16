@@ -222,6 +222,15 @@ def main(argv: list[str] | None = None) -> int:
               "先过取景预检，随后按提示操作：保持段摆好姿势后不动 5s，"
               "间隙里把翻手/换手做完再进入下一段（可出画再回来）。")
 
+    # safe_mode 在 gate-diag/sign-ref 强制 safe 之后才定格，故放在这里而非更早。
+    safe_mode = bool(args.safe_mode) or sys.platform != "win32"
+    # 环境指纹（commit + config_sha256 + 工作区脏标记）落进诊断文件头：取证与跨轮
+    # 比对只读这一份结构化日志，它必须能自证"这一轮跑的是哪个 commit、哪份生效
+    # 配置"，不能只指望被重定向的 stdout（gatediag-stdout-*.log）。与 stdout 复用
+    # 同一 _environment_line，保证两份文件的指纹行逐字一致、可对拍。
+    if diag_logger is not None:
+        diag_logger.info("%s", _environment_line(config, safe_mode))
+
     if args.guided:
         steps = guided.build_steps()
         if args.diagnostic_seconds <= 0:
@@ -239,7 +248,6 @@ def main(argv: list[str] | None = None) -> int:
         multi_monitor=config.multi_monitor,
         virtual_desk_experimental=config.virtual_desk_experimental,
     )
-    safe_mode = bool(args.safe_mode) or sys.platform != "win32"
 
     try:
         backend = NullMouseBackend(screen_map) if safe_mode else Win32MouseBackend(config, screen_map)
