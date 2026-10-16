@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from handmouse.contracts import (
     DetectionPacket,
@@ -23,6 +24,24 @@ from handmouse.contracts import (
     PipelineSnapshot,
 )
 from handmouse.screen_map import ScreenMap
+
+# cv2.FONT_HERSHEY_SIMPLEX 不含中文字形，HUD 文字改由 PIL 绘制。
+# 按 微软雅黑 → 黑体 → 宋体 顺序加载系统字体，全部缺失时回退 PIL
+# 默认字体（回退态中文仍会乱码，但至少导入不崩、HUD 其余信息可读）。
+def _load_hud_font(size: int):
+    for path in (
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+    ):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+_HUD_FONT = _load_hud_font(16)
 
 WINDOW_NAME = "HandMouse - 手势追踪"
 
@@ -79,30 +98,25 @@ def draw_hud(
 ) -> None:
     """带半透明底衬的文字面板，保证在白墙/暗背景上都读得清。"""
 
-    line_height = 26
+    line_height = 24
     padding = 10
-    width = max(
-        cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 1)[0][0]
-        for text, _color in rows
-    ) + padding * 2
+    bboxes = [_HUD_FONT.getbbox(text) for text, _ in rows]
+    width = max(bbox[2] - bbox[0] for bbox in bboxes) + padding * 2
     height = line_height * len(rows) + padding * 2
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (8, 8), (8 + width, 8 + height), (32, 32, 32), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
+    # PIL 用 RGB，cv2 是 BGR；文字绘制走 PIL，底衬已用 cv2 画好。
+    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
     for index, (text, color) in enumerate(rows):
-        origin = (8 + padding, 8 + padding + line_height * (index + 1) - 8)
-        cv2.putText(
-            frame,
-            text,
-            origin,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.58,
-            color,
-            1,
-            cv2.LINE_AA,
-        )
+        y = 8 + padding + line_height * index
+        # cv2 color 是 BGR，PIL 需要 RGB
+        r, g, b = color[2], color[1], color[0]
+        draw.text((8 + padding, y), text, font=_HUD_FONT, fill=(r, g, b))
+    frame[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
 def build_view(
