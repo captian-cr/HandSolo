@@ -20,6 +20,7 @@
   "pinch_arm": 0.72,
   "right_pinch_approach_delta": 0.22,
   "drag_hold_ms": 5000,
+  "drag_gain": 1.0,
   "double_click_window_ms": 350,
   "double_click_max_drift": 0.05,
   "fist_hold_ms": 500,

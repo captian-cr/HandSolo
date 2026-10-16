@@ -63,6 +63,9 @@ class AppConfig:
     pinch_arm: float = 0.72
     right_pinch_approach_delta: float = 0.22
     drag_hold_ms: int = 5000
+    # 拖拽锚定式光标的位移增益：屏幕行程 = gain × 掌心屏幕位移。
+    # 掌心刚体行程比食指尖短，实机觉得拖拽偏慢时只调此值，不改代码。
+    drag_gain: float = 1.0
     # 双击（捏合两下）判定窗口：第一次释放后单击延迟这么久提交，窗口内
     # 第二次同位置捏合升级为双击。单击因此有一次窗口长度的延迟（VR 设备
     # 的捏合确认同款取舍），宁可延迟也不能在双击前先点一下。
@@ -131,6 +134,7 @@ class AppConfig:
             min(0.60, float(self.right_pinch_approach_delta)),
         )
         self.drag_hold_ms = max(300, min(10_000, int(self.drag_hold_ms)))
+        self.drag_gain = max(0.1, min(5.0, float(self.drag_gain)))
         self.double_click_window_ms = max(
             100, min(1000, int(self.double_click_window_ms)),
         )

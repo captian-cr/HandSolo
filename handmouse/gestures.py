@@ -187,6 +187,10 @@ class GestureEngine:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.filter = self._build_pointer_filter(config)
+        # 最近一次 _smooth 输出（屏幕归一化）。正常拖拽必先经过若干 pointer
+        # 帧，初值实际不会被用到；保险起见给屏幕中心，避免极端直入路径把
+        # 拖拽锚点锁在左上角。
+        self._last_smoothed: tuple[float, float] = (0.5, 0.5)
         self.state = ControlState.IDLE
         self.current_gesture = GestureType.NONE
         self.paused = False
@@ -229,6 +233,10 @@ class GestureEngine:
         self._page_swipe_latched = False
         self._lost_reported = False
         self._left_button_down = False
+        # 拖拽锚定式光标：进入拖拽帧锁掌心屏幕坐标与当时光标，拖拽中
+        # MOVE = 锚定光标 + drag_gain × (当前掌心 - 锚定掌心)。
+        self._drag_anchor_palm: tuple[float, float] | None = None
+        self._drag_anchor_cursor: tuple[float, float] = (0.5, 0.5)
         # 双击（捏合两下）子状态，不占顶层 ControlState：
         # 第一次短捏合释放后不立即提交单击，挂起一个双击窗口；窗口内第二次
         # 同位置捏合（中间必须完全释放过）升级为 LEFT_DOUBLE_CLICK，窗口
@@ -283,27 +291,43 @@ class GestureEngine:
     ) -> MouseCommand:
         return MouseCommand(kind=kind, timestamp_ns=timestamp_ns, **kwargs)
 
-    def _cursor(self, point: Landmark, timestamp_ns: int) -> tuple[float, float]:
-        mapped = map_activity_region(
+    def _map(self, point: Landmark) -> tuple[float, float]:
+        """landmark 画面归一化坐标 → 屏幕归一化坐标（无状态纯映射）。"""
+
+        return map_activity_region(
             point.x,
             point.y,
             self.config.pointer_margin_x,
             self.config.pointer_margin_y,
         )
-        filtered_x, filtered_y = self.filter.update(*mapped, timestamp_ns)
+
+    def _smooth(self, x: float, y: float, timestamp_ns: int) -> tuple[float, float]:
+        """屏幕归一化坐标过 OneEuro，并维护最近平滑输出。
+
+        ``_last_smoothed`` 是拖拽锚定式 MOVE 的光标基准；正常路径与
+        拖拽路径共享同一个滤波器，退出拖拽时不需要重新收敛。
+        """
+
+        filtered_x, filtered_y = self.filter.update(x, y, timestamp_ns)
         if self.config.pointer_edge_override:
-            # 关键点到达安全活动区边界时直接完成最后一小段屏幕行程。
+            # 目标到达安全活动区边界时直接完成最后一小段屏幕行程。
             # 这样不需要把手移出摄像头等待滤波器慢慢收敛到0或1。
-            if mapped[0] <= 0.0 or mapped[0] >= 1.0:
-                filtered_x = mapped[0]
-            if mapped[1] <= 0.0 or mapped[1] >= 1.0:
-                filtered_y = mapped[1]
+            # 拖拽路径的 raw 同为屏幕归一化坐标，边界语义一致。
+            if x <= 0.0 or x >= 1.0:
+                filtered_x = x
+            if y <= 0.0 or y >= 1.0:
+                filtered_y = y
+        self._last_smoothed = (filtered_x, filtered_y)
         return filtered_x, filtered_y
+
+    def _cursor(self, point: Landmark, timestamp_ns: int) -> tuple[float, float]:
+        return self._smooth(*self._map(point), timestamp_ns)
 
     def _release_left(self, timestamp_ns: int) -> list[MouseCommand]:
         if not self._left_button_down:
             return []
         self._left_button_down = False
+        self._drag_anchor_palm = None
         return [self._command(MouseCommandType.LEFT_UP, timestamp_ns)]
 
     def _expire_click_pending(self, now_ns: int) -> None:
@@ -822,7 +846,20 @@ class GestureEngine:
                     self._left_button_down = True
                     self.state = ControlState.DRAGGING
             if self._left_button_down:
-                x, y = self._cursor(points[8], now)
+                # 锚定式拖拽：掌心(0/5/9/13/17)是刚体点，食指弯缩不改变它，
+                # 因此"手不动、只弯食指"不会产生任何 MOVE 位移。
+                palm_x, palm_y = self._map(_palm_center(points))
+                if self._drag_anchor_palm is None:
+                    # 进入帧位移为 0：raw 等于上次平滑输出，滤波器 deadzone
+                    # 内严格回传同一坐标，不跳变。
+                    self._drag_anchor_palm = (palm_x, palm_y)
+                    self._drag_anchor_cursor = self._last_smoothed
+                anchor_px, anchor_py = self._drag_anchor_palm
+                anchor_cx, anchor_cy = self._drag_anchor_cursor
+                gain = self.config.drag_gain
+                raw_x = anchor_cx + gain * (palm_x - anchor_px)
+                raw_y = anchor_cy + gain * (palm_y - anchor_py)
+                x, y = self._smooth(raw_x, raw_y, now)
                 commands.append(self._command(MouseCommandType.MOVE, now, x=x, y=y))
             return commands
 

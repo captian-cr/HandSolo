@@ -192,6 +192,83 @@ def test_long_left_pinch_becomes_drag_then_releases() -> None:
     assert kinds(released) == [MouseCommandType.LEFT_UP]
 
 
+def test_drag_cursor_stays_put_when_only_index_finger_curves() -> None:
+    """方案 B 验收（等式级）：手整体不动、只弯食指，拖拽 MOVE 严格不变。
+
+    掌心由 0/5/9/13/17 构成，食指尖弯缩不改变掌心屏幕坐标；锚定式 MOVE
+    的 raw 逐帧恒等，OneEuro deadzone 内输出与输入严格相等——不是容差近似。
+    """
+
+    engine = GestureEngine(AppConfig(drag_hold_ms=300))
+
+    def feed(points, ms):
+        return engine.process(observation(points, BASE + int(ms * 1_000_000)))
+
+    # 先有 pointer 帧建立真实光标，再接触式捏合进入拖拽。
+    pinch = left_pinch_points()
+    feed(pointer_points(), 0)
+    feed(pinch, 33)
+    entered = feed(pinch, 350)
+    assert kinds(entered) == [MouseCommandType.LEFT_DOWN, MouseCommandType.MOVE]
+    anchor = (entered[1].x, entered[1].y)
+
+    move_positions = [anchor]
+    t_ms = 383
+
+    # 8 步把食指尖向 PIP 方向弯缩 0.020（拇指尖与手掌其余点完全不动）。
+    bend_total = 0.020
+    for step in range(1, 9):
+        bent = list(pinch)
+        bent[8] = Landmark(pinch[8].x, pinch[8].y + bend_total * step / 8)
+        commands = feed(tuple(bent), t_ms)
+        t_ms += 33
+        move_positions.extend(
+            (command.x, command.y)
+            for command in commands
+            if command.kind == MouseCommandType.MOVE
+        )
+
+    # 弯到底后再静止 6 帧，稳态输出同样必须严格等于锚点。
+    fully_bent = list(pinch)
+    fully_bent[8] = Landmark(pinch[8].x, pinch[8].y + bend_total)
+    for _ in range(6):
+        commands = feed(tuple(fully_bent), t_ms)
+        t_ms += 33
+        move_positions.extend(
+            (command.x, command.y)
+            for command in commands
+            if command.kind == MouseCommandType.MOVE
+        )
+
+    assert len(move_positions) > 1
+    assert all(position == anchor for position in move_positions)
+
+
+def test_drag_cursor_follows_whole_hand_translation() -> None:
+    """锚定式拖拽的正向保证：整手平移（掌心刚体位移）必须带动光标。"""
+
+    engine = GestureEngine(AppConfig(drag_hold_ms=300))
+
+    def feed(points, ms):
+        return engine.process(observation(points, BASE + int(ms * 1_000_000)))
+
+    pinch = left_pinch_points()
+    feed(pointer_points(), 0)
+    feed(pinch, 33)
+    entered = feed(pinch, 350)
+    anchor = (entered[1].x, entered[1].y)
+
+    last_move = anchor
+    for step in range(1, 5):
+        moved = translate_points(pinch, dx=0.01 * step, dy=0.0)
+        commands = feed(moved, 350 + step * 33)
+        for command in commands:
+            if command.kind == MouseCommandType.MOVE:
+                last_move = (command.x, command.y)
+
+    assert last_move[0] > anchor[0]
+
+
 def test_hand_loss_releases_active_drag_once() -> None:
     engine = GestureEngine(AppConfig(drag_hold_ms=300, hand_lost_ms=200))
     engine.process(observation(left_pinch_points(), BASE))
