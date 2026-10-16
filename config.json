@@ -33,7 +33,7 @@
   "page_swipe_threshold": 0.7,
   "entry_gate_enabled": true,
   "entry_hold_ms": 300,
-  "entry_palm_sin_min": 0.1,
+  "entry_palm_nz_min": 0.3,
   "partial_finger_tracking": true,
   "partial_tracking_frames": 0,
   "cursor_snap_enabled": true,

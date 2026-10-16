@@ -118,24 +118,47 @@ def open_palm_points() -> tuple[Landmark, ...]:
 
 
 def entry_palm_points() -> tuple[Landmark, ...]:
-    """进入门姿势：五指张开 + 掌心朝镜，应被 ``_palm_presented`` 接受。
+    """进入门姿势：五指张开 + 掌心朝镜（模型坐标里的真实左手掌）。
 
-    坐标系约定已按 2026-10-16 flip-diag 实测修正：摄像头帧先 ``cv2.flip``
-    再送 MediaPipe，而 MediaPipe 按输入像素的**表观外观**判 handedness，
-    不做镜像补偿。本模块的 ``observation()`` 固定标签 ``"Right"``，在
-    ``mirror=True`` 下它对应**真实左手**；真实左手掌心朝镜时掌轴(5→17) 与
-    拇指矢量(5→4) 的二维叉积为负（实测 flip-diag #38：label=Right
-    cross≈-0.0029）。故本夹具叉积为负，才能在 mirror=True + 标签 Right 下
-    通过朝向判定。
+    坐标系约定按 2026-10-16 sign-ref 三轮回算修正：摄像头帧先 ``cv2.flip``
+    再送 MediaPipe，MediaPipe 按输入像素的**表观外观**判 handedness，不做镜像
+    补偿。本模块 ``observation()`` 固定标签 ``"Right"``，在 ``mirror=True`` 下
+    它对应**真实左手**。
+
+    真实左手掌心（模型坐标，实测中位）掌轴 0→5 指向画面右上、掌宽轴 5→17 指向
+    左下。三点 0-5-17 的二维有向面积 ``ax*by-ay*bx`` 因此为负，与
+    ``mirror=True`` + 标签 ``Right`` 推出的期望符号(-1) 一致，才通过朝向判定。
+    实测四姿势（sign-ref 三轮回算）：右手掌心 nz>0 / 右手背 nz<0 /
+    左手掌心 nz<0 / 左手背 nz>0。
+
+    旧夹具（直接复用右手取向的 ``open_palm_points``）在旧观测量 5→17 × 5→4 下
+    恰好符号正确，但换成 0-5-17 三角朝向后符号相反、会被判成"手背"——这是观测量
+    更换后必须同步修正的夹具，不是放宽判定。
     """
 
-    return open_palm_points()
+    points: list[Landmark] = [Landmark(0.5, 0.5, 0.0)] * 21
+    coords = {
+        0: (0.50, 0.90),                                             # wrist
+        1: (0.55, 0.78), 2: (0.62, 0.72), 3: (0.68, 0.66), 4: (0.72, 0.60),   # thumb
+        5: (0.62, 0.62), 6: (0.63, 0.50), 7: (0.64, 0.40), 8: (0.65, 0.30),   # index
+        9: (0.54, 0.60), 10: (0.54, 0.48), 11: (0.54, 0.37), 12: (0.54, 0.26),  # middle
+        13: (0.46, 0.61), 14: (0.46, 0.49), 15: (0.46, 0.38), 16: (0.46, 0.29),  # ring
+        17: (0.38, 0.64), 18: (0.38, 0.52), 19: (0.38, 0.42), 20: (0.38, 0.34),  # pinky
+    }
+    for idx, (x, y) in coords.items():
+        points[idx] = Landmark(x, y, 0.0)
+    # 0→5=(+0.12,-0.28)、5→17=(-0.24,+0.02) ⇒ nz = -0.0648 < 0，与期望符号一致。
+    return tuple(points)
 
 
 def entry_back_points() -> tuple[Landmark, ...]:
-    """误进防护：同一只手手背朝镜（拇指翻到掌轴另一侧，叉积为正）。"""
+    """误进防护：同一只手手背朝镜（沿画面水平轴镜像 ⇒ 0-5-17 三角朝向翻号）。
 
-    points = open_palm_points()
+    水平镜像把 nz 的符号取反（0→5 的 x 分量与 5→17 的 x 分量同时变号），
+    因此手背的 nz>0，与期望符号(-1) 相反、被拒。
+    """
+
+    points = entry_palm_points()
     center_x = sum(points[index].x for index in (0, 5, 9, 13, 17)) / 5
     return tuple(Landmark(2 * center_x - point.x, point.y, point.z) for point in points)
 

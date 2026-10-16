@@ -132,59 +132,78 @@ def _is_five_open(points: tuple[Landmark, ...]) -> bool:
     )
 
 
-#: 朝向判定叉积归一化幅度下限的模块默认值（config 未提供时诊断用）。
-#: 注意这是"几何退化帧底线"而非"掌/背分界"——见 _palm_presented 说明。
-_ENTRY_PALM_SIN_MIN = 0.10
+#: 朝向判定幅度的模块默认值（config 未提供时诊断用）。
+#: 这是"几何退化帧底线"而非"掌/背分界"——掌/背由朝向量的**符号**决定，
+#: 见 _palm_presented 说明。
+_ENTRY_PALM_NZ_MIN = 0.30
 
 
-def _palm_axis_cross(points: tuple[Landmark, ...]) -> tuple[float, float]:
-    """掌轴(5→17) 与拇指矢量(5→4) 的二维叉积，及其归一化幅度 ≈ sinθ。
+def _palm_facing_unit(points: tuple[Landmark, ...]) -> float:
+    """掌面 0-5-17 三角形 3D 法向的 z 分量（单位化），即掌面朝向镜头量。
 
-    sinθ = |cross| / (|5→17| · |5→4|) 是尺度无关的"两轴夹角正弦"，随两轴
-    接近共线而趋 0。叉积符号本身对图像内旋转不变，是判掌/背的方向量；
-    sinθ 用来识别"符号已沦为噪声"的退化帧。
+    符号来自**二维投影朝向**：0→5→17 三角形在图像平面的有向面积
+    ``ax*by - ay*bx``（恰为 3D 叉积的 z 分量）。掌心与掌背在图像里互为镜像，
+    绕前臂轴旋前时该三角形朝向整体翻转，故符号随掌/背翻转。
+
+    为什么不用旧的 5→17 × 5→4：拇指尖偏离掌面，旋前时 5→4 的沿轴分量占主导，
+    叉积的可变部分被压进噪声区（"符号逻辑对、观测量错"）。换成 0-5-17 的
+    三角朝向，观测量才对得上符号逻辑。
+
+    三点 z 只贡献分母（3D 模长），用于**幅度归一化**——不参与符号判定；写死
+    在此，防止将来有人看到"3D 法向"就把 z 当符号来源、把归一化改回旧路。
+
+    |返回值| 是掌面朝向镜头的置信度：→1 正对/背对镜头，→0 侧掌（0/5/17 三点
+    近乎共线，退化帧返回 0.0）。**高 |值| 并不保证符号正确**：实测右手背符号
+    最不稳（约四成帧翻转，四姿势中最弱），这是本特征在本数据上的已知残留，
+    交由时间窗（③）处理，不是靠调幅度门槛能解决的。
     """
 
-    across_x = points[17].x - points[5].x
-    across_y = points[17].y - points[5].y
-    thumb_x = points[4].x - points[5].x
-    thumb_y = points[4].y - points[5].y
-    cross = across_x * thumb_y - across_y * thumb_x
-    across_len = hypot(across_x, across_y)
-    thumb_len = hypot(thumb_x, thumb_y)
-    if across_len < 1e-6 or thumb_len < 1e-6:
-        return cross, 0.0
-    return cross, abs(cross) / (across_len * thumb_len)
+    ax = points[5].x - points[0].x
+    ay = points[5].y - points[0].y
+    az = points[5].z - points[0].z
+    bx = points[17].x - points[5].x
+    by = points[17].y - points[5].y
+    bz = points[17].z - points[5].z
+    nz = ax * by - ay * bx
+    nx = ay * bz - az * by
+    ny = az * bx - ax * bz
+    norm = sqrt(nx * nx + ny * ny + nz * nz)
+    if norm < 1e-9:
+        return 0.0
+    return nz / norm
 
 
-def _log_sign_ref_cross(
+def _log_sign_ref_facing(
     points: tuple[Landmark, ...],
     handedness: str,
     hn_valid: bool,
     frontal_ratio: float,
     mirror: bool,
-    sin_min: float,
+    min_nz: float,
 ) -> None:
-    """【仅参照模式】无条件输出掌轴×拇指叉积与 sin，供掌/背四姿势采符号参照。
+    """【仅参照模式】无条件输出掌面朝向量与幅度，供掌/背四姿势采符号参照。
 
-    ``HANDMOUSE_SIGN_REF=1`` 时用它替代常规 ``cross/(skip)`` 行：即使
+    ``HANDMOUSE_SIGN_REF=1`` 时用它替代常规 ``nz_unit/(skip)`` 行：即使
     ``frontal_ratio`` 不足也照算照打，免得手背/侧掌那组拿不到符号。
     **纯日志**——不返回、不写状态；判定链（``_palm_presented`` /
     ``gate_eligible`` / gate / 注入）在上面早已算完，本函数一行都不碰。
     整块独立，删除即干净 revert。
+
+    观测量口径随本笔由旧 ``cross``（5→17 × 5→4）换成 ``nz_unit``（0-5-17
+    三角朝向）：旧参照日志里的 ``cross`` 行与新日志的 ``nz_unit`` 行不可混读。
     """
 
     if not hn_valid:
         _DIAG_LOGGER.info(
-            "  [sign-ref] cross=N/A hn=%s frontal=%.4f（无有效手别）",
+            "  [sign-ref] nz_unit=N/A hn=%s frontal=%.4f（无有效手别）",
             handedness or '""', frontal_ratio,
         )
         return
-    cross, sin_theta = _palm_axis_cross(points)
+    facing = _palm_facing_unit(points)
     _DIAG_LOGGER.info(
-        "  [sign-ref] cross=%.6f sin=%.3f(min=%.2f) hn=%s frontal=%.4f mirror=%s"
+        "  [sign-ref] nz_unit=%.6f |nz|=%.4f(min=%.2f) hn=%s frontal=%.4f mirror=%s"
         "（仅参照模式，不影响判定）",
-        cross, sin_theta, sin_min, handedness, frontal_ratio, mirror,
+        facing, abs(facing), min_nz, handedness, frontal_ratio, mirror,
     )
 
 
@@ -193,13 +212,17 @@ def _palm_presented(
     handedness: str,
     *,
     mirror: bool,
-    min_sin: float = _ENTRY_PALM_SIN_MIN,
+    min_nz: float = _ENTRY_PALM_NZ_MIN,
 ) -> bool:
     """掌心朝镜且掌面基本正对镜头（排除侧掌与手背朝镜）。
 
-    单目模型给不出掌心法向，但"掌心/掌背"在图像里是镜像关系：掌心朝镜时
-    拇指落在掌轴(5→17)的一侧，掌背朝镜时落在另一侧。取掌轴与拇指矢量
-    (5→4) 的二维叉积，符号对图像内旋转不变。
+    判据 = **符号正确** 且 **掌面朝向镜头置信度达标**：
+      1) ``_palm_facing_unit`` 的符号等于期望符号：由 0-5-17 三角形在图像
+         平面的有向面积定掌/背（掌/背在图像里互为镜像、符号相反）；
+      2) ``|_palm_facing_unit| >= min_nz``：只丢弃几何退化帧（三点近共线、
+         朝向量沦为噪声），**不是掌/背分界**。阈值 0.30 的依据是「清掉错号
+         最严重的 L-back 帧 p10≈0.10，而正常帧 |nz| 中位≈0.95 有巨大余量、
+         不误杀」，**不是**"0.30 足以区分掌/背"——符号噪声它是压不住的。
 
     期望符号的由来（**关键，勿凭直觉改**）：
       MediaPipe 的 handedness 按**输入像素的表观外观**判手别，不做镜像补
@@ -209,14 +232,11 @@ def _palm_presented(
       ``mirror`` 为真时再取 ``-expected``。写成"基准符号 × mirror 修正"而非
       两套分支，避免将来 mirror 语义再变时漏改一处。
 
-    实测三角（mirror=True，模型坐标叉积）：
-      * 右手掌心 label=Left  cross 为正 → 应判 True；
-      * 右手背   label=Left  cross 为负 → 应判 False；
-      * 左手掌心 label=Right cross 为负 → 应判 True。
-
-    幅度门槛 ``min_sin`` 只负责丢弃几何退化帧（掌轴与拇指近共线、符号沦为
-    噪声），**不是掌/背分界**：掌/背由上面的符号决定。实测退化帧 sin≤0.08，
-    手背有效段 0.11–0.17 会被门槛放行、靠符号正确拒绝。
+    实测（2026-10-16 sign-ref 三轮回算，模型坐标 nz_unit 符号）：
+      * 右手掌心 label=Left  nz>0 → 应判 True；
+      * 右手背   label=Left  nz<0 → 应判 False（右手背最弱：约四成帧错号）；
+      * 左手掌心 label=Right nz<0 → 应判 True；
+      * 左手背   label=Right nz>0 → 应判 False。
 
     handedness 缺失时返回 False（保守关闭闸门）：宁可进不去控制态，也不
     能让手背/侧掌把手误开闸门。
@@ -227,13 +247,13 @@ def _palm_presented(
         return False
     if handedness not in ("Left", "Right"):
         return False
-    cross, sin_theta = _palm_axis_cross(points)
-    if sin_theta < min_sin:
+    facing = _palm_facing_unit(points)
+    if abs(facing) < min_nz:
         return False
     expected = 1.0 if handedness == "Right" else -1.0
     if mirror:
         expected = -expected
-    return cross * expected > 0.0
+    return facing * expected > 0.0
 
 
 # 进入门诊断开关：环境变量控制，跨模块生效。
@@ -242,7 +262,7 @@ VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
 )
 # 参照模式开关（HANDMOUSE_SIGN_REF）：**默认关、环境变量控制、不进 config**，
 # 避免被持久化进 config.json 或误进生产。唯一作用：诊断日志在 frontal 不足时
-# 也照打 cross/sin（供掌/背四姿势采符号参照）。**纯日志开关**，不改任何判定。
+# 也照打 nz_unit（供掌/背四姿势采符号参照）。**纯日志开关**，不改任何判定。
 SIGN_REF = os.environ.get("HANDMOUSE_SIGN_REF", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
@@ -548,20 +568,19 @@ class GestureEngine:
 
                 palm_presented = False
                 if hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN and span >= 1e-6:
-                    cross, palm_sin = _palm_axis_cross(points)
-                    # 与生产判定同源：基准符号随 mirror 反号，幅度门槛杀退化帧。
+                    palm_nz = _palm_facing_unit(points)
+                    # 与生产判定同源：基准符号随 mirror 反号，幅度门槛只杀退化帧。
                     expected_sign = 1.0 if hn == "Right" else -1.0
                     if self.config.mirror:
                         expected_sign = -expected_sign
-                    cross_match = cross * expected_sign > 0.0
+                    nz_match = palm_nz * expected_sign > 0.0
                     palm_presented = (
-                        cross_match and palm_sin >= self.config.entry_palm_sin_min
+                        nz_match and abs(palm_nz) >= self.config.entry_palm_nz_min
                     )
                 else:
-                    cross = 0.0
-                    palm_sin = 0.0
+                    palm_nz = 0.0
                     expected_sign = 0.0
-                    cross_match = False
+                    nz_match = False
 
                 gate_eligible = (not self._gate_active) and five_open and palm_presented
                 held_ms = (now - self._entry_started_ns) / 1_000_000 if self._entry_started_ns else 0.0
@@ -627,25 +646,25 @@ class GestureEngine:
                         _ENTRY_THUMB_SPREAD_MIN, five_open,
                     )
                     if SIGN_REF:
-                        # 【仅参照模式】无条件打 cross/sin，替代常规 cross/(skip)。
+                        # 【仅参照模式】无条件打 nz_unit，替代常规 nz_unit/(skip)。
                         # 上面的判定（palm_presented/gate_eligible/gate/注入）已算完，
                         # 本分支只换日志输出，不改任何判定结果。整块可一键删除 revert。
-                        _log_sign_ref_cross(
+                        _log_sign_ref_facing(
                             points, hn, hn_valid, palm_frontal_ratio,
-                            self.config.mirror, self.config.entry_palm_sin_min,
+                            self.config.mirror, self.config.entry_palm_nz_min,
                         )
                     elif hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
                         _DIAG_LOGGER.info(
-                            "  cross=%.6f sin=%.3f(min=%.2f) mirror=%s expected_sign=%s "
-                            "cross_match=%s → gate_eligible=%s",
-                            cross, palm_sin, self.config.entry_palm_sin_min,
+                            "  nz_unit=%.6f |nz|=%.4f(min=%.2f) mirror=%s expected_sign=%s "
+                            "nz_match=%s → gate_eligible=%s",
+                            palm_nz, abs(palm_nz), self.config.entry_palm_nz_min,
                             self.config.mirror,
                             "+1" if expected_sign > 0 else "-1",
-                            cross_match, gate_eligible,
+                            nz_match, gate_eligible,
                         )
                     else:
                         _DIAG_LOGGER.info(
-                            "  cross=(skip) expected_sign=N/A → gate_eligible=%s",
+                            "  nz_unit=(skip) expected_sign=N/A → gate_eligible=%s",
                             gate_eligible,
                         )
             else:
@@ -675,7 +694,7 @@ class GestureEngine:
                     points,
                     observation.handedness,
                     mirror=self.config.mirror,
-                    min_sin=self.config.entry_palm_sin_min,
+                    min_nz=self.config.entry_palm_nz_min,
                 )
             ):
                 if self._entry_started_ns is None:

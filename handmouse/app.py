@@ -479,11 +479,13 @@ def _gate_diag_run_header(config: AppConfig) -> str:
 
     ``expected_sign`` 由 ``mirror × handedness`` 派生（同一镜像下左/右手符号
     相反），无法用单一标量表示，故此处只记录 ``mirror`` 这个输入变量本身。
+    朝向观测量本笔由旧 ``cross``（5→17 × 5→4）换成 ``nz_unit``（0-5-17 三角
+    朝向）；门槛只拒几何退化帧，不解决符号噪声。
     """
 
     return (
         f"[gate-diag运行头] mirror={config.mirror} "
-        f"entry_palm_sin_min={config.entry_palm_sin_min:.2f} "
+        f"entry_palm_nz_min={config.entry_palm_nz_min:.2f} "
         "(expected_sign 由 mirror×handedness 派生)"
     )
 
@@ -491,14 +493,15 @@ def _gate_diag_run_header(config: AppConfig) -> str:
 def _sign_ref_run_header(config: AppConfig) -> str:
     """sign-ref 诊断日志的运行头：钉死镜像约定，并声明本模式不改判定。
 
-    参照行（``[sign-ref] cross/sin``）与 gate-diag 的 ``cross`` 行同源，隔轮
+    参照行（``[sign-ref] nz_unit``）与 gate-diag 的 ``nz_unit`` 行同源，隔轮
     回看时必须能从文件头自证"这一轮跑的是哪种镜像约定"。同时显式写明本模式
-    只加日志、不改判定，避免将来考古把它误读成判定逻辑。
+    只加日志、不改判定，避免将来考古把它误读成判定逻辑。观测量口径本笔已由
+    ``cross`` 换成 ``nz_unit``，新旧参照日志不可混读。
     """
 
     return (
         f"[sign-ref运行头] mirror={config.mirror} "
-        f"entry_palm_sin_min={config.entry_palm_sin_min:.2f} "
+        f"entry_palm_nz_min={config.entry_palm_nz_min:.2f} "
         "（仅参照模式：只加诊断日志、不改任何判定）"
     )
 
