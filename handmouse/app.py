@@ -99,8 +99,9 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--sign-ref",
         action="store_true",
-        help="掌/背朝向符号参照：4 姿势（右手掌/右手背/左手掌/左手背）× 3s 定点序列，"
-        "采集 handedness/cross/sin 参照样本。隐含 --safe-mode。"
+        help="掌/背朝向符号参照：4 姿势（右手掌/右手背/左手掌/左手背）× 5s"
+        " + 3 个 2s 换姿势间隙的定点序列，采集 handedness/cross/sin 参照样本。"
+        "隐含 --safe-mode。"
         "需同时设置环境变量 HANDMOUSE_SIGN_REF=1 才会输出诊断日志"
         "（该开关只加诊断日志、不改任何判定）。",
     )
@@ -217,8 +218,9 @@ def main(argv: list[str] | None = None) -> int:
         if not sign_ref:
             print("[符号参照] 未检测到 HANDMOUSE_SIGN_REF=1：几何日志仍会写，"
                   "但 [sign-ref] cross/sin 参照行不会输出。请以 HANDMOUSE_SIGN_REF=1 启动。")
-        print(f"[符号参照] 共 {len(diag_steps)} 姿势 × 3s = {total:.0f}s，safe-mode 已开启。"
-              "先过取景预检，随后每个姿势按提示保持不动 3s（五指张开、掌面正对镜头）。")
+        print(f"[符号参照] 共 4 姿势（每段保持 5s）+ 3 个 2s 换姿势间隙 = {total:.0f}s，safe-mode 已开启。"
+              "先过取景预检，随后按提示操作：保持段摆好姿势后不动 5s，"
+              "间隙里把翻手/换手做完再进入下一段（可出画再回来）。")
 
     if args.guided:
         steps = guided.build_steps()
