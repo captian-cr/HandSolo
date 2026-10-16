@@ -437,9 +437,9 @@ class HandLandmarkerWorker(threading.Thread):
         # 短一些，避免脸重新入画后长时间漏过滤。
         self._FACE_MISS_CACHE_NS = 200_000_000
 
-    # flip 语义取证节流：1.2s 一对、最多 16 对，一次运行覆盖 ~19s 动作。
-    _FLIP_DIAG_INTERVAL_NS = 1_200_000_000
-    _FLIP_DIAG_MAX = 16
+    # flip 语义取证节流：1.0s 一对、最多 40 对，一次运行覆盖三段姿势。
+    _FLIP_DIAG_INTERVAL_NS = 1_000_000_000
+    _FLIP_DIAG_MAX = 40
 
     def _flip_diag_dump(
         self,
@@ -518,8 +518,11 @@ class HandLandmarkerWorker(threading.Thread):
             else 0.0
         )
         tag = f"{self._flip_diag_count:02d}-{timestamp_ms}"
-        cv2.imwrite(str(self._flip_diag_dir / f"post-{tag}.png"), post_bgr)
-        cv2.imwrite(str(self._flip_diag_dir / f"pre-{tag}.png"), pre_bgr)
+        # cv2.imwrite 在 Windows 中文路径下静默失败，改 imencode+tofile。
+        for name, img in (f"post-{tag}.png", post_bgr), (f"pre-{tag}.png", pre_bgr):
+            ok, buffer = cv2.imencode(".png", img)
+            if ok:
+                buffer.tofile(str(self._flip_diag_dir / name))
         print(
             f"[flip-diag] #{self._flip_diag_count:02d} ts={timestamp_ms} "
             f"mirror={self.config.mirror} label={handedness} score={score:.2f} "
