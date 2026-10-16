@@ -131,7 +131,7 @@ class Win32MouseBackend:
             origin_x=origin_x,
             origin_y=origin_y,
             # 屏幕度量签名：DPI 模式/显示器数量/原点尺寸一变，磁吸缓存立刻作废。
-            screen_signature=screen_map.describe(),
+            screen_signature=self.screen_map.describe(),
             enabled=config.cursor_snap_enabled,
             radius_px=config.cursor_snap_radius_px,
         )

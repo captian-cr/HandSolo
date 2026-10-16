@@ -62,6 +62,21 @@ def _win32_backend() -> Win32MouseBackend:
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 后端仅在 Windows 上可用")
+def test_win32_backend_without_injected_screen_map_constructs() -> None:
+    """回归：screen_map 缺省构造不得因 snapper 误用局部 None 而崩溃。
+
+    "主路径总显式传入"是当前事实而非接口保证；缺省参数路径（测试/脚本/
+    新后端）必须同样可用。修复前本测试在 describe() 处 AttributeError。
+    """
+
+    backend = Win32MouseBackend(AppConfig(cursor_snap_enabled=False))
+    try:
+        assert backend.screen_map is not None
+    finally:
+        backend.shutdown()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Win32 结构体仅在 Windows 上定义")
 def test_win32_input_structs_match_documented_layout() -> None:
     from handmouse.mouse import INPUT, KEYBDINPUT, MOUSEINPUT
