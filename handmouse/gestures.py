@@ -132,12 +132,6 @@ def _is_five_open(points: tuple[Landmark, ...]) -> bool:
     )
 
 
-#: 朝向判定幅度的模块默认值（config 未提供时诊断用）。
-#: 这是"几何退化帧底线"而非"掌/背分界"——掌/背由朝向量的**符号**决定，
-#: 见 _palm_presented 说明。
-_ENTRY_PALM_NZ_MIN = 0.30
-
-
 def _palm_facing_unit(points: tuple[Landmark, ...]) -> float:
     """掌面 0-5-17 三角形 3D 法向的 z 分量（单位化），即掌面朝向镜头量。
 
@@ -153,9 +147,10 @@ def _palm_facing_unit(points: tuple[Landmark, ...]) -> float:
     在此，防止将来有人看到"3D 法向"就把 z 当符号来源、把归一化改回旧路。
 
     |返回值| 是掌面朝向镜头的置信度：→1 正对/背对镜头，→0 侧掌（0/5/17 三点
-    近乎共线，退化帧返回 0.0）。**高 |值| 并不保证符号正确**：实测右手背符号
-    最不稳（约四成帧翻转，四姿势中最弱），这是本特征在本数据上的已知残留，
-    交由时间窗（③）处理，不是靠调幅度门槛能解决的。
+    近乎共线，退化帧返回 0.0）。**高 |值| 并不保证符号逐帧正确**：右手背的原始
+    符号统计曾显示约四成帧不匹配，后经特征化确认那部分是翻手/换手的 lag 块
+    （成块翻转、伴 |nz| 谷），不是逐帧噪声。过渡块由符号锁存压掉，见
+    ``GestureEngine._facing_committed``；不靠调幅度门槛解决。
     """
 
     ax = points[5].x - points[0].x
@@ -185,7 +180,7 @@ def _log_sign_ref_facing(
 
     ``HANDMOUSE_SIGN_REF=1`` 时用它替代常规 ``nz_unit/(skip)`` 行：即使
     ``frontal_ratio`` 不足也照算照打，免得手背/侧掌那组拿不到符号。
-    **纯日志**——不返回、不写状态；判定链（``_palm_presented`` /
+    **纯日志**——不返回、不写状态；判定链（``entry_palm_presented`` /
     ``gate_eligible`` / gate / 注入）在上面早已算完，本函数一行都不碰。
     整块独立，删除即干净 revert。
 
@@ -207,22 +202,8 @@ def _log_sign_ref_facing(
     )
 
 
-def _palm_presented(
-    points: tuple[Landmark, ...],
-    handedness: str,
-    *,
-    mirror: bool,
-    min_nz: float = _ENTRY_PALM_NZ_MIN,
-) -> bool:
-    """掌心朝镜且掌面基本正对镜头（排除侧掌与手背朝镜）。
-
-    判据 = **符号正确** 且 **掌面朝向镜头置信度达标**：
-      1) ``_palm_facing_unit`` 的符号等于期望符号：由 0-5-17 三角形在图像
-         平面的有向面积定掌/背（掌/背在图像里互为镜像、符号相反）；
-      2) ``|_palm_facing_unit| >= min_nz``：只丢弃几何退化帧（三点近共线、
-         朝向量沦为噪声），**不是掌/背分界**。阈值 0.30 的依据是「清掉错号
-         最严重的 L-back 帧 p10≈0.10，而正常帧 |nz| 中位≈0.95 有巨大余量、
-         不误杀」，**不是**"0.30 足以区分掌/背"——符号噪声它是压不住的。
+def _expected_palm_sign(handedness: str, mirror: bool) -> float:
+    """由手别 + mirror 推出"掌心朝镜"应有的 nz 符号（+1/-1；手别缺失返回 0.0）。
 
     期望符号的由来（**关键，勿凭直觉改**）：
       MediaPipe 的 handedness 按**输入像素的表观外观**判手别，不做镜像补
@@ -233,27 +214,19 @@ def _palm_presented(
       两套分支，避免将来 mirror 语义再变时漏改一处。
 
     实测（2026-10-16 sign-ref 三轮回算，模型坐标 nz_unit 符号）：
-      * 右手掌心 label=Left  nz>0 → 应判 True；
-      * 右手背   label=Left  nz<0 → 应判 False（右手背最弱：约四成帧错号）；
-      * 左手掌心 label=Right nz<0 → 应判 True；
-      * 左手背   label=Right nz>0 → 应判 False。
+      * 右手掌心 label=Left  nz>0 → 期望 +1；
+      * 右手背   label=Left  nz<0 → 期望 +1（手背应与期望相反才叫"拒绝"）；
+      * 左手掌心 label=Right nz<0 → 期望 -1；
+      * 左手背   label=Right nz>0 → 期望 -1。
 
-    handedness 缺失时返回 False（保守关闭闸门）：宁可进不去控制态，也不
-    能让手背/侧掌把手误开闸门。
+    handedness 缺失返回 0.0，由 ``GestureEngine._palm_presented`` 保守判 False
+    （宁可进不去控制态，也不能让手背/侧掌把手误开闸门）。
     """
 
-    span = _distance_2d(points[0], points[12])
-    if span < 1e-6 or _palm_width(points) / span < _ENTRY_PALM_FRONTAL_MIN:
-        return False
     if handedness not in ("Left", "Right"):
-        return False
-    facing = _palm_facing_unit(points)
-    if abs(facing) < min_nz:
-        return False
+        return 0.0
     expected = 1.0 if handedness == "Right" else -1.0
-    if mirror:
-        expected = -expected
-    return facing * expected > 0.0
+    return -expected if mirror else expected
 
 
 # 进入门诊断开关：环境变量控制，跨模块生效。
@@ -298,6 +271,12 @@ class GestureEngine:
         # 进入门：entry_gate_enabled 关闭时恒为 True，与旧行为完全等价。
         self._gate_active = not config.entry_gate_enabled
         self._entry_started_ns: int | None = None
+        # 符号锁存：进入门朝向判定的迟滞状态（仅 _gate_active=False 时维护，
+        # 开闸/退出门/暂停/失联时清零，见 _reset_facing_latch）。冷启动首帧免 K，
+        # 之后只有 |nz|≥commit 的帧连续 K 帧同号才允许改变已锁定符号。
+        self._locked_facing: float | None = None
+        self._candidate_facing: float | None = None
+        self._candidate_count: int = 0
         # 诊断用：进入门几何判定层的帧计数和去重缓存
         self._gate_diag_frame = 0
         self._gate_diag_last_sig: tuple | None = None
@@ -357,6 +336,7 @@ class GestureEngine:
             # 关掉闸门时立刻回到"始终可控"，不再要求重新做进入姿势。
             self._gate_active = True
             self._entry_started_ns = None
+            self._reset_facing_latch()
 
     def _exit_gate(self, timestamp_ns: int) -> list[MouseCommand]:
         """握拳退出控制态：闸门回到未开。
@@ -379,6 +359,104 @@ class GestureEngine:
         min_cutoff = 3.0 - 2.2 * config.pointer_stability
         beta = 0.35 + 1.55 * config.pointer_response
         return OneEuroPointerFilter(min_cutoff=min_cutoff, beta=beta)
+
+    def _reset_facing_latch(self) -> None:
+        """清零符号锁存。仅在进入门未开时有意义；开闸/退出门/暂停/失联时调用。"""
+
+        self._locked_facing = None
+        self._candidate_facing = None
+        self._candidate_count = 0
+
+    def _facing_committed(
+        self,
+        nz_unit: float,
+        commit_min: float,
+        k: int,
+    ) -> float | None:
+        """符号锁存：返回当前已锁定的朝向符号(+1/-1)；尚无锁定时返回 None。
+
+        机制 = |nz| 参与门 + K 帧确认：
+          * 冷启动：首个 |nz| ≥ entry_palm_nz_min 的帧**立即采纳**其符号、免 K。
+            否则"进入门 300ms + K 帧 ≈ 1.2s"会拖慢开闸，等于引入新 bug；
+          * 已锁定：只有 |nz| ≥ commit_min 的帧才有资格改变符号，且需连续 K
+            帧同号；|nz| < commit_min 的帧冻结候选（清零），不参与切换。
+
+        迟滞的意义：|nz| 落在 [min, commit) 的帧"看得清（进得去）但不够格改变
+        朝向判定"。实测右手背换手过渡块 |nz|≈0.46~0.56 正卡在此区间，被 commit
+        门吃掉大部分——这是"压过渡块"而非"修逐帧符号噪声"。
+        """
+
+        sign = 1.0 if nz_unit > 0 else -1.0
+
+        if self._locked_facing is None:
+            if abs(nz_unit) >= self.config.entry_palm_nz_min:
+                self._locked_facing = sign
+            return self._locked_facing
+
+        if abs(nz_unit) < commit_min:
+            self._candidate_facing = None
+            self._candidate_count = 0
+            return self._locked_facing
+
+        if sign == self._locked_facing:
+            self._candidate_facing = None
+            self._candidate_count = 0
+            return self._locked_facing
+
+        if sign == self._candidate_facing:
+            self._candidate_count += 1
+        else:
+            self._candidate_facing = sign
+            self._candidate_count = 1
+
+        if self._candidate_count >= k:
+            self._locked_facing = sign
+            self._candidate_facing = None
+            self._candidate_count = 0
+        return self._locked_facing
+
+    def _palm_presented(
+        self,
+        points: tuple[Landmark, ...],
+        expected_sign: float,
+    ) -> bool:
+        """掌心朝镜且掌面基本正对镜头（排除侧掌与手背朝镜）。
+
+        判据 = 非侧掌 + **锁存符号**等于期望符号 + |nz| 过进入门：
+          1) 侧掌排除：掌宽/腕-中指指尖 < _ENTRY_PALM_FRONTAL_MIN；
+          2) 符号判定走符号锁存 ``_facing_committed``（**先更新锁存**）：只有过
+             commit 门的帧连续 K 帧同号才能改变已锁定符号，压掉换手/翻手的
+             过渡块（lag 块）；
+          3) |nz| < entry_palm_nz_min 的几何退化帧直接判 False。锁存**先于**
+             本门更新，故退化帧会走 ``<commit`` 分支清零候选——"连续 K 帧"因此
+             是严格的，不会被退化帧隔断后跨谷累加。
+
+        实测（2026-10-16 sign-ref 三轮回算，模型坐标 nz_unit 符号）：
+          右手掌心 label=Left nz>0 → 应判 True；右手背 label=Left nz<0 → False；
+          左手掌心 label=Right nz<0 → 应判 True；左手背 label=Right nz>0 → False。
+
+        expected_sign==0（handedness 缺失）时返回 False（保守关闭闸门）。
+        """
+
+        if expected_sign == 0.0:
+            return False
+        span = _distance_2d(points[0], points[12])
+        if span < 1e-6 or _palm_width(points) / span < _ENTRY_PALM_FRONTAL_MIN:
+            return False
+        nz = _palm_facing_unit(points)
+        # 先更新锁存、再过 min 门：退化帧（|nz| < min ≤ commit）走 _facing_committed
+        # 的 ``<commit`` 分支清零候选，锁存不变。这样"连续 K 帧"严格，退化帧打断
+        # 候选而不是被无视（否则 -0.9/-0.25 交替也能把 -0.9 累加到 K）。
+        locked = self._facing_committed(
+            nz,
+            commit_min=self.config.entry_palm_nz_commit,
+            k=self.config.entry_facing_commit_frames,
+        )
+        if abs(nz) < self.config.entry_palm_nz_min:
+            return False
+        if locked is None:
+            return False
+        return (locked > 0) == (expected_sign > 0)
 
     def _command(
         self,
@@ -466,6 +544,9 @@ class GestureEngine:
         return commands
 
     def _reset_transient(self) -> None:
+        # 进入门锁存也属"跨帧瞬时状态"：退出门/暂停/失联时一并清零，
+        # 避免上一轮的朝向残值污染下次进入。
+        self._reset_facing_latch()
         self._left_active = False
         self._left_started_ns = None
         self._right_active = False
@@ -541,6 +622,17 @@ class GestureEngine:
 
         now = observation.timestamp_ns
 
+        # ---- 进入门候选：每帧只求值一次 ----
+        # 符号锁存是有状态的：诊断块与进入门块若各调一次 _palm_presented，会双倍
+        # 推进候选帧数、让 K 帧确认失真。故在此统一求值，两处只读结果，保证
+        # "判定调用的那一次"就是"日志展示的那一次"。锁存仅在闸门未开时维护。
+        entry_five_open = len(points) == 21 and _is_five_open(points)
+        entry_expected = _expected_palm_sign(observation.handedness, self.config.mirror)
+        entry_nz = _palm_facing_unit(points) if len(points) == 21 else 0.0
+        entry_palm_presented = False
+        if not self._gate_active and len(points) == 21:
+            entry_palm_presented = self._palm_presented(points, entry_expected)
+
         # -------- 进入门诊断：几何判定层 --------
         # 限流：每 5 帧（~6Hz）+ gate_eligible/palm_presented/five_open 任一变 True 时立即打。
         # 相同内容去重用 signature。所有新计算都包在 if VERBOSE_GATE 内。
@@ -559,28 +651,28 @@ class GestureEngine:
                 palm_w = _palm_width(points)
                 span = _distance_2d(points[0], points[12])
                 palm_frontal_ratio = palm_w / span if span >= 1e-6 else 0.0
-                five_open = all_ext and (
-                    _distance_2d(points[4], points[17]) / palm_w >= _ENTRY_THUMB_SPREAD_MIN
-                )
 
                 hn = observation.handedness
                 hn_valid = hn in ("Left", "Right")
 
-                palm_presented = False
-                if hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN and span >= 1e-6:
-                    palm_nz = _palm_facing_unit(points)
-                    # 与生产判定同源：基准符号随 mirror 反号，幅度门槛只杀退化帧。
-                    expected_sign = 1.0 if hn == "Right" else -1.0
-                    if self.config.mirror:
-                        expected_sign = -expected_sign
-                    nz_match = palm_nz * expected_sign > 0.0
-                    palm_presented = (
-                        nz_match and abs(palm_nz) >= self.config.entry_palm_nz_min
-                    )
-                else:
-                    palm_nz = 0.0
-                    expected_sign = 0.0
-                    nz_match = False
+                # 读进入门候选（上面每帧唯一求值）：判定与诊断同源，且不会因
+                # 两处各调一次 _palm_presented 而双倍推进锁存候选（锁存有状态，
+                # 双调即 bug）。
+                # 注意 ``palm_presented`` 的语义**不再是几何掌/背真值**，而是"当前
+                # 进入判定的求值结果"：闸门已开时进入判定不跑，此处恒 False。见到
+                # 它 False 而手明明是掌心属正常（此刻没在做进入判定），不是 bug。
+                five_open = entry_five_open
+                palm_presented = entry_palm_presented
+                palm_nz = entry_nz
+                expected_sign = entry_expected
+                locked_label = (
+                    "None" if self._locked_facing is None
+                    else ("+1" if self._locked_facing > 0 else "-1")
+                )
+                nz_match = (
+                    self._locked_facing is not None
+                    and (self._locked_facing > 0) == (entry_expected > 0)
+                )
 
                 gate_eligible = (not self._gate_active) and five_open and palm_presented
                 held_ms = (now - self._entry_started_ns) / 1_000_000 if self._entry_started_ns else 0.0
@@ -655,12 +747,15 @@ class GestureEngine:
                         )
                     elif hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
                         _DIAG_LOGGER.info(
-                            "  nz_unit=%.6f |nz|=%.4f(min=%.2f) mirror=%s expected_sign=%s "
-                            "nz_match=%s → gate_eligible=%s",
+                            "  nz_unit=%.6f |nz|=%.4f(min=%.2f commit=%.2f frames=%d) "
+                            "mirror=%s expected_sign=%s locked=%s nz_match=%s "
+                            "→ palm_presented=%s gate_eligible=%s",
                             palm_nz, abs(palm_nz), self.config.entry_palm_nz_min,
+                            self.config.entry_palm_nz_commit,
+                            self.config.entry_facing_commit_frames,
                             self.config.mirror,
-                            "+1" if expected_sign > 0 else "-1",
-                            nz_match, gate_eligible,
+                            "+1" if expected_sign > 0 else ("-1" if expected_sign < 0 else "N/A"),
+                            locked_label, nz_match, palm_presented, gate_eligible,
                         )
                     else:
                         _DIAG_LOGGER.info(
@@ -687,16 +782,9 @@ class GestureEngine:
         if not self._gate_active:
             self.last_hand_ns = arrival_ns
             self._lost_reported = False
-            if (
-                len(points) == 21
-                and _is_five_open(points)
-                and _palm_presented(
-                    points,
-                    observation.handedness,
-                    mirror=self.config.mirror,
-                    min_nz=self.config.entry_palm_nz_min,
-                )
-            ):
+            # 复用上面每帧唯一求值的进入门候选（entry_five_open /
+            # entry_palm_presented），不在此重算，避免双倍推进符号锁存候选。
+            if entry_five_open and entry_palm_presented:
                 if self._entry_started_ns is None:
                     self._entry_started_ns = now
                 held_ms = (now - self._entry_started_ns) / 1_000_000
@@ -704,8 +792,10 @@ class GestureEngine:
                     self.state = ControlState.IDLE
                     self.current_gesture = GestureType.GATE_IDLE
                     return []
-                # 姿势已满时长：本帧开闸，继续走正常手势判定。
+                # 姿势已满时长：本帧开闸，继续走正常手势判定。开闸后不再看掌面
+                # （上面的闸门块整体跳过），锁存留着无意义且会污染下次进入，清零。
                 self._gate_active = True
+                self._reset_facing_latch()
             else:
                 self._entry_started_ns = None
                 self.state = ControlState.IDLE
@@ -1193,4 +1283,5 @@ class GestureEngine:
             # 做一次进入姿势，避免"手一晃出去又晃回来"直接恢复控制。
             self._gate_active = False
             self._entry_started_ns = None
+            self._reset_facing_latch()
         return commands

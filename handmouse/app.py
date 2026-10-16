@@ -475,17 +475,20 @@ def _worktree_mark() -> str:
 
 
 def _gate_diag_run_header(config: AppConfig) -> str:
-    """gate-diag 诊断日志的运行头：记录镜像约定与朝向幅度门槛。
+    """gate-diag 诊断日志的运行头：记录镜像约定、进入门幅度门与符号锁存参数。
 
     ``expected_sign`` 由 ``mirror × handedness`` 派生（同一镜像下左/右手符号
     相反），无法用单一标量表示，故此处只记录 ``mirror`` 这个输入变量本身。
     朝向观测量本笔由旧 ``cross``（5→17 × 5→4）换成 ``nz_unit``（0-5-17 三角
-    朝向）；门槛只拒几何退化帧，不解决符号噪声。
+    朝向）；``entry_palm_nz_min`` 只拒几何退化帧，符号改由锁存压过渡块
+    （``entry_palm_nz_commit`` 参与门 + ``entry_facing_commit_frames`` 帧确认）。
     """
 
     return (
         f"[gate-diag运行头] mirror={config.mirror} "
         f"entry_palm_nz_min={config.entry_palm_nz_min:.2f} "
+        f"entry_palm_nz_commit={config.entry_palm_nz_commit:.2f} "
+        f"entry_facing_commit_frames={config.entry_facing_commit_frames} "
         "(expected_sign 由 mirror×handedness 派生)"
     )
 
@@ -502,6 +505,8 @@ def _sign_ref_run_header(config: AppConfig) -> str:
     return (
         f"[sign-ref运行头] mirror={config.mirror} "
         f"entry_palm_nz_min={config.entry_palm_nz_min:.2f} "
+        f"entry_palm_nz_commit={config.entry_palm_nz_commit:.2f} "
+        f"entry_facing_commit_frames={config.entry_facing_commit_frames} "
         "（仅参照模式：只加诊断日志、不改任何判定）"
     )
 

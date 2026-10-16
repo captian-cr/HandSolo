@@ -93,9 +93,19 @@ class AppConfig:
     # 这是"几何退化帧底线"，不是"掌/背分界"：掌/背靠期望符号区分，本值只用来
     # 丢弃 0/5/17 三点近共线、朝向量沦为噪声的帧。阈值 0.30 的依据是「清掉错号
     # 最严重的 L-back 帧 p10≈0.10，正常帧 |nz| 中位≈0.95 有巨大余量、不误杀」，
-    # **不是**"0.30 足以区分掌/背"。单独使用本值**不解决符号噪声**——高 |nz| 帧的
-    # 符号抖动是本特征在本数据上的已知残留，交由时间窗处理。
+    # **不是**"0.30 足以区分掌/背"。它**不解决符号噪声**——右手背的原始符号统计
+    # 曾显示约四成帧不匹配，后经特征化确认那部分是翻手/换手的 lag 块（成块翻转、
+    # 伴 |nz| 谷），不是逐帧噪声；由符号锁存（entry_palm_nz_commit + 帧数）压掉。
     entry_palm_nz_min: float = 0.30
+    # 符号锁存的"参与门"：只有 |nz| ≥ 本值的帧才允许改变已锁定的朝向符号。
+    # 与上面的最低置信度门职责不同——|nz| 落在 [min, commit) 区间的帧"看得清
+    # （进得去）但不够格改变朝向判定"，构成迟滞。实测右手背换手过渡块
+    # |nz|≈0.46~0.56，0.50 门可吃掉其大部分。必须 ≥ entry_palm_nz_min（见 validate）。
+    entry_palm_nz_commit: float = 0.50
+    # 符号锁存的确认帧数：新符号需连续 K 帧同号且都过 commit 门才被采纳。
+    # 8 帧 ≈ 0.5s @8.5fps，覆盖实测最长过渡块（6 帧）留 2 帧余量。
+    # K 与 commit 一次只调一个变量，否则无法归因是哪个起作用。
+    entry_facing_commit_frames: int = 8
 
     # ---- 局部续跟踪 ----
     partial_finger_tracking: bool = True
@@ -156,6 +166,11 @@ class AppConfig:
         self.page_swipe_threshold = max(0.35, min(1.5, float(self.page_swipe_threshold)))
         self.entry_hold_ms = max(80, min(1500, int(self.entry_hold_ms)))
         self.entry_palm_nz_min = max(0.0, min(1.0, float(self.entry_palm_nz_min)))
+        self.entry_palm_nz_commit = max(0.1, min(0.95, float(self.entry_palm_nz_commit)))
+        # 参与门必须 ≥ 进入门：否则"够格改朝向"比"进得去"还松，迟滞消失——配置
+        # 写错会静默失效，故在此强制拉齐。
+        self.entry_palm_nz_commit = max(self.entry_palm_nz_commit, self.entry_palm_nz_min)
+        self.entry_facing_commit_frames = max(2, min(30, int(self.entry_facing_commit_frames)))
         self.partial_tracking_frames = max(0, min(600, int(self.partial_tracking_frames)))
         self.min_detection_confidence = max(0.25, min(0.90, float(self.min_detection_confidence)))
         self.min_presence_confidence = max(0.25, min(0.90, float(self.min_presence_confidence)))

@@ -4,7 +4,7 @@ from math import sqrt
 
 from handmouse.config import AppConfig
 from handmouse.contracts import HandObservation, Landmark, MouseCommandType
-from handmouse.gestures import GestureEngine, _palm_facing_unit, _palm_presented
+from handmouse.gestures import GestureEngine, _expected_palm_sign, _palm_facing_unit
 
 from conftest import (
     ambiguous_right_pinch_points,
@@ -789,6 +789,26 @@ def _palm_landmarks(*, nz_value: float) -> tuple[Landmark, ...]:
     return tuple(points)
 
 
+def _entry_engine() -> GestureEngine:
+    """进入门开启的引擎（符号锁存走真实产路径）。"""
+
+    return GestureEngine(AppConfig(entry_gate_enabled=True))
+
+
+def _presented(
+    engine: GestureEngine,
+    nz_value: float,
+    handedness: str = "Left",
+    mirror: bool = True,
+) -> bool:
+    """用单帧 ``_palm_landmarks`` 驱动 ``_palm_presented``（可复用同一引擎）。"""
+
+    return engine._palm_presented(
+        _palm_landmarks(nz_value=nz_value),
+        _expected_palm_sign(handedness, mirror),
+    )
+
+
 def test_palm_presented_matches_measured_signs_under_mirror() -> None:
     """mirror=True：四组 sign-ref 实测符号必须判对。
 
@@ -797,22 +817,15 @@ def test_palm_presented_matches_measured_signs_under_mirror() -> None:
       label=Right nz<0；左手背 label=Right nz>0。
     """
 
+    # 每条断言用新引擎：锁存有状态，冷启动首帧免 K 立即采纳。
     # 右手掌心：label=Left、nz>0 → 接受。
-    assert _palm_presented(
-        _palm_landmarks(nz_value=+0.90), "Left", mirror=True, min_nz=0.30,
-    ) is True
+    assert _presented(_entry_engine(), +0.90, "Left", True) is True
     # 右手背：label=Left、nz<0 → 拒绝。
-    assert _palm_presented(
-        _palm_landmarks(nz_value=-0.90), "Left", mirror=True, min_nz=0.30,
-    ) is False
+    assert _presented(_entry_engine(), -0.90, "Left", True) is False
     # 左手掌心：label=Right、nz<0 → 接受。
-    assert _palm_presented(
-        _palm_landmarks(nz_value=-0.90), "Right", mirror=True, min_nz=0.30,
-    ) is True
+    assert _presented(_entry_engine(), -0.90, "Right", True) is True
     # 左手背：label=Right、nz>0 → 拒绝。
-    assert _palm_presented(
-        _palm_landmarks(nz_value=+0.90), "Right", mirror=True, min_nz=0.30,
-    ) is False
+    assert _presented(_entry_engine(), +0.90, "Right", True) is False
 
 
 def test_palm_presented_matches_signs_without_mirror() -> None:
@@ -821,16 +834,10 @@ def test_palm_presented_matches_signs_without_mirror() -> None:
     无镜像时右手掌心 nz>0（与 mirror=True 的左手掌心同号），左手掌心 nz<0。
     """
 
-    assert _palm_presented(
-        _palm_landmarks(nz_value=+0.90), "Right", mirror=False, min_nz=0.30,
-    ) is True
-    assert _palm_presented(
-        _palm_landmarks(nz_value=-0.90), "Left", mirror=False, min_nz=0.30,
-    ) is True
+    assert _presented(_entry_engine(), +0.90, "Right", False) is True
+    assert _presented(_entry_engine(), -0.90, "Left", False) is True
     # 无镜像下的手背：同一标签、符号相反 → 拒绝。
-    assert _palm_presented(
-        _palm_landmarks(nz_value=-0.90), "Right", mirror=False, min_nz=0.30,
-    ) is False
+    assert _presented(_entry_engine(), -0.90, "Right", False) is False
 
 
 def test_palm_presented_nz_threshold_boundary() -> None:
@@ -842,9 +849,7 @@ def test_palm_presented_nz_threshold_boundary() -> None:
     for nz_value, expected in ((0.29, False), (0.30, True), (0.31, True)):
         points = _palm_landmarks(nz_value=nz_value)
         assert _palm_facing_unit(points) == pytest.approx(nz_value, abs=1e-9)
-        assert _palm_presented(
-            points, "Left", mirror=True, min_nz=0.30,
-        ) is expected
+        assert _presented(_entry_engine(), nz_value) is expected
 
 
 def test_palm_facing_unit_returns_zero_for_collinear_frame() -> None:
@@ -861,7 +866,97 @@ def test_palm_facing_unit_returns_zero_for_collinear_frame() -> None:
     points[17] = Landmark(0.5, 0.5, 0.0)  # 与 0、5 同线
 
     assert _palm_facing_unit(points) == 0.0
-    assert _palm_presented(points, "Left", mirror=True, min_nz=0.30) is False
+    assert _entry_engine()._palm_presented(
+        points, _expected_palm_sign("Left", True),
+    ) is False
+
+
+# ---------------- 符号锁存（③：|nz| 门控 + K 帧确认）----------------
+# 下面用默认 "Left"+mirror：期望符号 = +1，故 nz>0 为"匹配"、nz<0 为"错号"。
+
+
+def test_facing_lock_adopts_first_frame_without_k() -> None:
+    """冷启动首帧采纳：|nz|≥min 一帧即锁定，不等 K 帧。
+
+    若首帧也要 K 帧确认，开闸会从 300ms 拖到 300ms+K 帧 ≈ 1.2s——那是新 bug。
+    """
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True
+    assert engine._locked_facing == +1.0
+
+
+def test_facing_lock_ignores_transition_block_shorter_than_k() -> None:
+    """过渡块不采纳：已锁 +1 后，6 帧错号且 |nz|=0.50 不得切换锁存。"""
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True   # 首帧锁 +1（= 期望符号）
+
+    for _ in range(6):
+        assert _presented(engine, -0.50) is True   # 过渡块，锁未变 → 仍"匹配"
+
+    assert engine._locked_facing == +1.0
+    assert engine._candidate_count == 6           # 候选在累积但未达 K=8
+
+
+def test_facing_lock_switches_after_k_continuous_high_confidence_frames() -> None:
+    """持续 K 帧采纳：8 帧同向且 |nz|≥commit 才切换锁存。"""
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True
+
+    results = [_presented(engine, -0.90) for _ in range(8)]
+
+    assert results[:7] == [True] * 7      # 前 7 帧仍是旧锁 +1
+    assert engine._locked_facing == -1.0  # 第 8 帧切换
+    assert results[-1] is False           # 切换后与期望 +1 不符
+
+
+def test_facing_lock_ignores_frames_below_commit_magnitude() -> None:
+    """中等幅值不参与：8 帧同向但 |nz|=0.40 < commit → 不切换。"""
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True
+
+    for _ in range(8):
+        assert _presented(engine, -0.40) is True   # <commit，冻结候选
+
+    assert engine._locked_facing == +1.0
+    assert engine._candidate_count == 0
+
+
+def test_facing_lock_candidate_resets_on_sub_commit_frames() -> None:
+    """退化/中等幅值帧清零候选：交替 0.40/0.20 序列 → 候选始终清零。"""
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True
+
+    for nz_value in (-0.40, -0.20) * 4:
+        _presented(engine, nz_value)
+
+    assert engine._locked_facing == +1.0
+    assert engine._candidate_facing is None
+    assert engine._candidate_count == 0
+
+
+def test_facing_lock_requires_strictly_consecutive_frames() -> None:
+    """严格连续：退化帧（|nz| < min）必须打断候选，不得跨谷累加。
+
+    序列 ``-0.9 / -0.25`` 交替 8 组（-0.9 共出现 8 次但**不连续**）：
+    若退化帧对锁存不可见（|nz|<min 早退在 _facing_committed 之前），-0.9 会被
+    累加到 K=8 而切换锁存——违反"连续 K 帧"的本意。锁存必须先于 min 门更新，
+    让 -0.25 走 ``<commit`` 分支清零候选。
+    """
+
+    engine = _entry_engine()
+    assert _presented(engine, +0.90) is True   # 锁 +1
+
+    for _ in range(8):
+        _presented(engine, -0.90)   # 错号、过 commit
+        _presented(engine, -0.25)   # 退化帧（< min），必须先打断候选
+
+    assert engine._locked_facing == +1.0
+    assert engine._candidate_count == 0
 
 
 def test_double_pinch_fires_double_click_without_early_single() -> None:
@@ -977,7 +1072,7 @@ def test_sign_ref_is_log_only_switch(monkeypatch, caplog) -> None:
     """参照模式是纯日志开关：开/关 SIGN_REF，判定与注入命令必须逐字一致。
 
     参照开关的唯一职责是"让 frontal 不足时也照打 cross/sin"。若它在任何路径
-    上改动了 ``_palm_presented`` / gate / 注入，这条断言立刻变红——参照拿的是
+    上改动了 ``entry_palm_presented`` / gate / 注入，这条断言立刻变红——参照拿的是
     数据，不能顺手改了判定的行为。
     """
 

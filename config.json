@@ -34,6 +34,8 @@
   "entry_gate_enabled": true,
   "entry_hold_ms": 300,
   "entry_palm_nz_min": 0.3,
+  "entry_palm_nz_commit": 0.5,
+  "entry_facing_commit_frames": 8,
   "partial_finger_tracking": true,
   "partial_tracking_frames": 0,
   "cursor_snap_enabled": true,
