@@ -175,6 +175,7 @@ def _log_sign_ref_facing(
     frontal_ratio: float,
     mirror: bool,
     min_nz: float,
+    handedness_score: float = 0.0,
 ) -> None:
     """【仅参照模式】无条件输出掌面朝向量与幅度，供掌/背四姿势采符号参照。
 
@@ -184,21 +185,27 @@ def _log_sign_ref_facing(
     ``gate_eligible`` / gate / 注入）在上面早已算完，本函数一行都不碰。
     整块独立，删除即干净 revert。
 
+    ``hn_score``（MediaPipe handedness 分类置信度）同样只观测不参与判定：
+    ④ 调查的**分叉判据**——若追踪链错锚首帧系统性低分，score 门槛可成为
+    最小修法；若错锚帧照样高置信，则标签不可救、改走几何法独立判手别。
+    结论未出前本字段只供统计，任何判定不得读它。
+
     观测量口径随本笔由旧 ``cross``（5→17 × 5→4）换成 ``nz_unit``（0-5-17
     三角朝向）：旧参照日志里的 ``cross`` 行与新日志的 ``nz_unit`` 行不可混读。
     """
 
     if not hn_valid:
         _DIAG_LOGGER.info(
-            "  [sign-ref] nz_unit=N/A hn=%s frontal=%.4f（无有效手别）",
-            handedness or '""', frontal_ratio,
+            "  [sign-ref] nz_unit=N/A hn=%s hn_score=%.4f frontal=%.4f（无有效手别）",
+            handedness or '""', handedness_score, frontal_ratio,
         )
         return
     facing = _palm_facing_unit(points)
     _DIAG_LOGGER.info(
-        "  [sign-ref] nz_unit=%.6f |nz|=%.4f(min=%.2f) hn=%s frontal=%.4f mirror=%s"
-        "（仅参照模式，不影响判定）",
-        facing, abs(facing), min_nz, handedness, frontal_ratio, mirror,
+        "  [sign-ref] nz_unit=%.6f |nz|=%.4f(min=%.2f) hn=%s hn_score=%.4f "
+        "frontal=%.4f mirror=%s（仅参照模式，不影响判定）",
+        facing, abs(facing), min_nz, handedness, handedness_score,
+        frontal_ratio, mirror,
     )
 
 
@@ -777,6 +784,7 @@ class GestureEngine:
                         _log_sign_ref_facing(
                             points, hn, hn_valid, palm_frontal_ratio,
                             self.config.mirror, self.config.entry_palm_nz_min,
+                            observation.handedness_score,
                         )
                     elif hn_valid and palm_frontal_ratio >= _ENTRY_PALM_FRONTAL_MIN:
                         _DIAG_LOGGER.info(

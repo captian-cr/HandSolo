@@ -1151,3 +1151,40 @@ def test_sign_ref_is_log_only_switch(monkeypatch, caplog) -> None:
     assert signature(on) == signature(off)
     # 开关确实生效：参照模式下打了 [sign-ref] 行，否则本测试是空跑、无牙。
     assert any("[sign-ref]" in record.getMessage() for record in caplog.records)
+
+
+def test_sign_ref_line_carries_handedness_score(monkeypatch, caplog) -> None:
+    """④ 分叉判据：SIGN_REF 逐帧行必须带 hn_score（观测用，非修法）。
+
+    用途见 gestures._log_sign_ref_facing：统计"追踪链错锚首帧 vs 正确锚首帧"
+    的 handedness 置信度分布，决定走 score 门槛还是几何判手别。缺这个字段，
+    下一轮实机拿不到分叉证据。有效/无效手别两条分支都必须带值。
+    """
+
+    from handmouse import gestures as gestures_module
+
+    monkeypatch.setattr(gestures_module, "VERBOSE_GATE", False)
+    monkeypatch.setattr(gestures_module, "SIGN_REF", True)
+
+    valid = observation(entry_palm_points(), BASE)
+    assert valid.handedness_score == 0.98
+    invalid = HandObservation(
+        landmarks=entry_palm_points(),
+        handedness="",
+        timestamp_ns=BASE + 100_000_000,
+        inference_ms=12.0,
+        handedness_score=0.42,
+    )
+
+    engine = GestureEngine(AppConfig())
+    with caplog.at_level(logging.INFO, logger="handmouse.gate-diag"):
+        engine.process(valid)
+        engine.process(invalid)
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "[sign-ref]" in record.getMessage()
+    ]
+    assert any("hn=Right" in line and "hn_score=0.9800" in line for line in messages)
+    assert any("nz_unit=N/A" in line and "hn_score=0.4200" in line for line in messages)
