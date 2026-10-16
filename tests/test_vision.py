@@ -13,6 +13,7 @@ from handmouse.vision import (
     CameraWorker,
     HandLandmarkerWorker,
     RecognitionTransform,
+    _thumb_axis_cross,
     prepare_recognition_frame,
 )
 
@@ -223,3 +224,33 @@ def test_camera_worker_reconnects_after_disconnect() -> None:
     assert failed_reopen.released
     assert any("摄像头已断开" in message for message in warnings)
     assert any("摄像头已恢复。" == message for message in warnings)
+
+
+def _hand_with_axes(k4, k5, k17) -> tuple[Landmark, ...]:
+    points = [Landmark(0.0, 0.0, 0.0)] * 21
+    points[4] = Landmark(*k4, 0.0)
+    points[5] = Landmark(*k5, 0.0)
+    points[17] = Landmark(*k17, 0.0)
+    return tuple(points)
+
+
+def test_thumb_axis_cross_sign_for_known_configuration() -> None:
+    # 掌轴 5→17 指向左下、拇指 5→4 指向右上：叉积为正。
+    points = _hand_with_axes(k4=(0.6, 0.3), k5=(0.5, 0.5), k17=(0.3, 0.6))
+
+    cross, len_across, len_thumb = _thumb_axis_cross(points)
+
+    assert np.isclose(cross, 0.03)
+    assert len_across > 0 and len_thumb > 0
+
+
+def test_thumb_axis_cross_flips_sign_under_horizontal_mirror() -> None:
+    # flip 语义取证的数学前提：像素水平镜像（x→1-x）只反相叉积符号，
+    # 不改幅度。若模型看到的是 flip 后像素，叉积方向量必然整体反号。
+    points = _hand_with_axes(k4=(0.6, 0.3), k5=(0.5, 0.5), k17=(0.3, 0.6))
+    mirrored = tuple(Landmark(1.0 - p.x, p.y, p.z) for p in points)
+
+    cross, _, _ = _thumb_axis_cross(points)
+    cross_m, _, _ = _thumb_axis_cross(mirrored)
+
+    assert np.isclose(cross_m, -cross)

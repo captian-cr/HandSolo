@@ -40,7 +40,7 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python import vision
 
-from handmouse.config import AppConfig
+from handmouse.config import PROJECT_ROOT, AppConfig
 from handmouse.contracts import (
     DetectionPacket,
     FramePacket,
@@ -82,7 +82,26 @@ LOGGER = logging.getLogger(__name__)
 VERBOSE_GATE = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
+# 镜像语义取证开关：成对落盘"模型实际输入帧 / 等价 flip 前帧"+ handedness，
+# 三值用同一 timestamp_ms 对齐，用于判定叉积 expected_sign 约定，默认关闭。
+FLIP_DIAG = os.environ.get("HANDMOUSE_FLIP_DIAG", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 _DIAG_LOGGER = logging.getLogger("handmouse.gate-diag")
+
+
+def _thumb_axis_cross(points) -> tuple[float, float, float]:
+    """掌轴 5→17 与拇指矢量 5→4 的二维叉积，及两轴长度（诊断用）。
+
+    叉积符号是 ``gestures._palm_presented`` 判掌/背的唯一方向量；单独抽出
+    供取证快照与单测共用，保证诊断算的就是判定层算的。
+    """
+
+    ax = points[17].x - points[5].x
+    ay = points[17].y - points[5].y
+    bx = points[4].x - points[5].x
+    by = points[4].y - points[5].y
+    return ax * by - ay * bx, float(np.hypot(ax, ay)), float(np.hypot(bx, by))
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +410,17 @@ class HandLandmarkerWorker(threading.Thread):
         )
         self._last_handedness = ""
         self._last_handedness_score = 0.0
+        # 镜像语义取证（HANDMOUSE_FLIP_DIAG=1）：默认目录为 None，生产零开销。
+        self._flip_diag_dir: Path | None = None
+        self._flip_diag_last_ns = 0
+        self._flip_diag_count = 0
+        if FLIP_DIAG:
+            diag_dir = PROJECT_ROOT / "logs" / (
+                f"flip-diag-{time.strftime('%Y%m%d-%H%M%S')}"
+            )
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            self._flip_diag_dir = diag_dir
+            print(f"[flip-diag] 镜像语义取证已开启：{diag_dir}")
         # OpenCV Haar Cascade 脸检测器：用于挡掉 MediaPipe 把脸误判为手的情况。
         # 轻量、不需要额外模型文件，与 zoom 后的识别帧同坐标系。
         # 同时检测正面脸和侧脸，union 结果覆盖各种转头角度。
@@ -406,6 +436,96 @@ class HandLandmarkerWorker(threading.Thread):
         # 每帧全量跑两个级联分类器，capture_fps 从 29.7 掉到 10。空结果有效期
         # 短一些，避免脸重新入画后长时间漏过滤。
         self._FACE_MISS_CACHE_NS = 200_000_000
+
+    # flip 语义取证节流：1.2s 一对、最多 16 对，一次运行覆盖 ~19s 动作。
+    _FLIP_DIAG_INTERVAL_NS = 1_200_000_000
+    _FLIP_DIAG_MAX = 16
+
+    def _flip_diag_dump(
+        self,
+        model_rgb: np.ndarray,
+        raw_points,
+        restored_points,
+        handedness: str,
+        score: float,
+        timestamp_ms: int,
+    ) -> None:
+        """成对落盘模型实际输入帧与等价 flip 前帧，三值按 ts 对齐。
+
+        flip 自逆（``flip(flip(x)) == x``），zoom/裁剪只平移缩放不改左右，
+        故把模型输入帧再 flip 一次即等价于采集线程 flip 前的像素，无需跨
+        线程回传采集帧。post 帧上画掌轴 5→17（红）与拇指矢量 5→4（青）。
+        """
+
+        if self._flip_diag_dir is None:
+            return
+        now_ns = time.monotonic_ns()
+        if self._flip_diag_count >= self._FLIP_DIAG_MAX:
+            return
+        if now_ns - self._flip_diag_last_ns < self._FLIP_DIAG_INTERVAL_NS:
+            return
+        self._flip_diag_last_ns = now_ns
+        self._flip_diag_count += 1
+
+        post_bgr = cv2.cvtColor(model_rgb, cv2.COLOR_RGB2BGR)
+        pre_bgr = cv2.flip(post_bgr, 1)
+        height, width = post_bgr.shape[:2]
+        label_line = (
+            f"ts={timestamp_ms} mirror={self.config.mirror} "
+            f"MP_label={handedness}({score:.2f})"
+        )
+        cv2.putText(
+            post_bgr, "MODEL INPUT (post-flip)", (10, 26),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+        )
+        cv2.putText(
+            pre_bgr, "EQUIV PRE-FLIP (sensor view)", (10, 26),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+        )
+        for img in (post_bgr, pre_bgr):
+            cv2.putText(
+                img, label_line, (10, 52),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
+            )
+            cv2.putText(
+                img, "<- frame left", (8, height - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (120, 120, 120), 2,
+            )
+
+        def _px(point) -> tuple[int, int]:
+            return int(point.x * width), int(point.y * height)
+
+        p4 = _px(raw_points[4])
+        p5 = _px(raw_points[5])
+        p17 = _px(raw_points[17])
+        cv2.arrowedLine(post_bgr, p5, p17, (0, 0, 255), 2)
+        cv2.arrowedLine(post_bgr, p5, p4, (255, 128, 0), 2)
+        for point, text, color in (
+            (p5, "5", (0, 255, 255)),
+            (p17, "17", (0, 0, 255)),
+            (p4, "4", (255, 128, 0)),
+        ):
+            cv2.putText(
+                post_bgr, text, point,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+            )
+
+        cross_raw, len_across, len_thumb = _thumb_axis_cross(raw_points)
+        cross_restored, _, _ = _thumb_axis_cross(restored_points)
+        sin_theta = (
+            abs(cross_raw) / (len_across * len_thumb)
+            if len_across > 1e-6 and len_thumb > 1e-6
+            else 0.0
+        )
+        tag = f"{self._flip_diag_count:02d}-{timestamp_ms}"
+        cv2.imwrite(str(self._flip_diag_dir / f"post-{tag}.png"), post_bgr)
+        cv2.imwrite(str(self._flip_diag_dir / f"pre-{tag}.png"), pre_bgr)
+        print(
+            f"[flip-diag] #{self._flip_diag_count:02d} ts={timestamp_ms} "
+            f"mirror={self.config.mirror} label={handedness} score={score:.2f} "
+            f"cross_raw={cross_raw:+.6f} cross_restored={cross_restored:+.6f} "
+            f"sin={sin_theta:.3f}"
+        )
 
     def _callback(
         self,
@@ -482,6 +602,15 @@ class HandLandmarkerWorker(threading.Thread):
             if len(observations) == 0:
                 self._last_handedness = handedness
                 self._last_handedness_score = handedness_score
+                if len(hand_points) == 21:
+                    self._flip_diag_dump(
+                        output_frame,
+                        hand_points,
+                        points,
+                        handedness,
+                        handedness_score,
+                        timestamp_ms,
+                    )
                 if self.config.partial_finger_tracking and len(hand_points) == 21:
                     self._partial_tracker.seed(
                         output_frame,
