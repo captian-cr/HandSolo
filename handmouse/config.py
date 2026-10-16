@@ -89,6 +89,12 @@ class AppConfig:
     # 进入姿势（掌心朝镜 + 五指张开）需连续保持的时间。退出复用既有常数：
     # 握拳退出沿用 fist_hold_ms，手出画退出沿用 hand_lost_ms。
     entry_hold_ms: int = 300
+    # 朝向判定的叉积归一化幅度下限(≈掌轴与拇指矢量夹角正弦)。这是"几何退化
+    # 帧底线"，不是"掌/背分界"：掌/背靠期望符号区分，本值只用来丢弃掌轴与
+    # 拇指几乎共线、符号沦为噪声的帧。实测退化帧 sin≤0.08、掌心有效帧
+    # 0.18–0.66；手背段 0.11–0.17 会被本值放行，靠符号正确拒绝。单独使用
+    # 本值会两头不讨好（既放行手背又误杀贴近底线的真掌心）。
+    entry_palm_sin_min: float = 0.10
 
     # ---- 局部续跟踪 ----
     partial_finger_tracking: bool = True
@@ -148,6 +154,7 @@ class AppConfig:
         self.palm_rotation_threshold = max(0.08, min(0.60, float(self.palm_rotation_threshold)))
         self.page_swipe_threshold = max(0.35, min(1.5, float(self.page_swipe_threshold)))
         self.entry_hold_ms = max(80, min(1500, int(self.entry_hold_ms)))
+        self.entry_palm_sin_min = max(0.0, min(0.5, float(self.entry_palm_sin_min)))
         self.partial_tracking_frames = max(0, min(600, int(self.partial_tracking_frames)))
         self.min_detection_confidence = max(0.25, min(0.90, float(self.min_detection_confidence)))
         self.min_presence_confidence = max(0.25, min(0.90, float(self.min_presence_confidence)))

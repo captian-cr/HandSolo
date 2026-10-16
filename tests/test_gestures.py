@@ -1,6 +1,9 @@
+import pytest
+from math import sqrt
+
 from handmouse.config import AppConfig
 from handmouse.contracts import HandObservation, Landmark, MouseCommandType
-from handmouse.gestures import GestureEngine
+from handmouse.gestures import GestureEngine, _palm_axis_cross, _palm_presented
 
 from conftest import (
     ambiguous_right_pinch_points,
@@ -757,7 +760,96 @@ def test_fist_during_click_or_drag_does_not_exit_gate() -> None:
     assert engine.current_gesture.value != "gate_idle"
 
 
-# ---------------- 双击（捏合两下，硬线 H6'）----------------
+# ---------------- 掌心朝向判定（mirror 语义修正 + sin 幅度门槛）----------------
+
+
+def _palm_landmarks(*, cross_sign: float, sin_value: float) -> tuple[Landmark, ...]:
+    """构造掌轴(5→17)沿 +x、拇指矢量(5→4)幅角可控的手。
+
+    across=(0.2, 0)，故叉积符号 = sign(thumb_y) = cross_sign；sinθ =
+    |thumb_y|/|thumb| 与 thumb 尺度无关，取 thumb=(√(1-s²), s)（单位长）即
+    得 sinθ≈sin_value。掌宽/腕-中指距离比 0.2/0.6≈0.33 ≥ 0.25 通过正对面判定。
+
+    thumb_y 乘 (1+1e-9)：√(1-s²) 的浮点舍入会让实测 sin 比 sin_value 低
+    约 1 ulp，导致 0.10 落在门槛下侧、边界用例抖动。这点相对偏置保证实测
+    sin ≥ 目标值，让"阈值含等号"的边界可稳定断言。
+    """
+
+    points = [Landmark(0.5, 0.5, 0.0)] * 21
+    points[0] = Landmark(0.5, 0.95, 0.0)
+    points[12] = Landmark(0.5, 0.35, 0.0)
+    points[5] = Landmark(0.40, 0.70, 0.0)
+    points[17] = Landmark(0.60, 0.70, 0.0)
+    thumb_y = cross_sign * sin_value * (1.0 + 1e-9)
+    thumb_x = sqrt(max(0.0, 1.0 - sin_value * sin_value))
+    points[4] = Landmark(points[5].x + thumb_x, points[5].y + thumb_y, 0.0)
+    return tuple(points)
+
+
+def test_palm_presented_matches_measured_signs_under_mirror() -> None:
+    """mirror=True：三组 flip-diag 实测符号必须判对。
+
+    实测（2026-10-16 flip-diag-20261016-114804，模型坐标）：
+      右手掌心 label=Left cross+；右手背 label=Left cross−；左手掌心
+      label=Right cross−。
+    """
+
+    # 右手掌心：label=Left、叉积为正 → 接受。
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=+1.0, sin_value=0.65),
+        "Left", mirror=True, min_sin=0.10,
+    ) is True
+    # 右手背：label=Left、叉积为负 → 拒绝。
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=-1.0, sin_value=0.30),
+        "Left", mirror=True, min_sin=0.10,
+    ) is False
+    # 左手掌心：label=Right、叉积为负 → 接受。
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=-1.0, sin_value=0.25),
+        "Right", mirror=True, min_sin=0.10,
+    ) is True
+    # 左手背：label=Right、叉积为正 → 拒绝。
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=+1.0, sin_value=0.25),
+        "Right", mirror=True, min_sin=0.10,
+    ) is False
+
+
+def test_palm_presented_matches_signs_without_mirror() -> None:
+    """mirror=False 回归：未翻转像素，标签即解剖学手别，约定仍成立。
+
+    无镜像时右手掌心 cross 为正（与 mirror=True 相反），左手掌心 cross 为负。
+    """
+
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=+1.0, sin_value=0.40),
+        "Right", mirror=False, min_sin=0.10,
+    ) is True
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=-1.0, sin_value=0.40),
+        "Left", mirror=False, min_sin=0.10,
+    ) is True
+    # 无镜像下的手背：同一标签、符号相反 → 拒绝。
+    assert _palm_presented(
+        _palm_landmarks(cross_sign=-1.0, sin_value=0.40),
+        "Right", mirror=False, min_sin=0.10,
+    ) is False
+
+
+def test_palm_presented_sin_threshold_boundary() -> None:
+    """幅度门槛边界：sin=0.09 拒绝、0.10 与 0.11 放行（门槛含等号）。
+
+    门槛只杀几何退化帧，不判掌/背；这里用符号正确的掌心帧只测门槛本身。
+    """
+
+    for sin_value, expected in ((0.09, False), (0.10, True), (0.11, True)):
+        points = _palm_landmarks(cross_sign=+1.0, sin_value=sin_value)
+        _, measured = _palm_axis_cross(points)
+        assert measured == pytest.approx(sin_value, abs=1e-9)
+        assert _palm_presented(
+            points, "Left", mirror=True, min_sin=0.10,
+        ) is expected
 
 
 def test_double_pinch_fires_double_click_without_early_single() -> None:

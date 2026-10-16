@@ -118,24 +118,26 @@ def open_palm_points() -> tuple[Landmark, ...]:
 
 
 def entry_palm_points() -> tuple[Landmark, ...]:
-    """进入门姿势：五指张开 + 掌心朝镜（镜像自拍坐标系下的右手）。
+    """进入门姿势：五指张开 + 掌心朝镜，应被 ``_palm_presented`` 接受。
 
-    坐标系约定：摄像头帧先做 ``cv2.flip`` 再送 MediaPipe，而 MediaPipe 的
-    handedness 假定输入是"已镜像的自拍画面"，所以标签就是真实左右手。
-    自拍镜像下的右手掌心朝镜，拇指落在画面右侧（解剖学姿势里拇指外侧朝人
-    体右侧，正对镜头时在画面左，镜像后翻到右）。此夹具据此构造，掌轴
-    (5→17) 与指向拇指的矢量 (5→4) 的二维叉积为正。
+    坐标系约定已按 2026-10-16 flip-diag 实测修正：摄像头帧先 ``cv2.flip``
+    再送 MediaPipe，而 MediaPipe 按输入像素的**表观外观**判 handedness，
+    不做镜像补偿。本模块的 ``observation()`` 固定标签 ``"Right"``，在
+    ``mirror=True`` 下它对应**真实左手**；真实左手掌心朝镜时掌轴(5→17) 与
+    拇指矢量(5→4) 的二维叉积为负（实测 flip-diag #38：label=Right
+    cross≈-0.0029）。故本夹具叉积为负，才能在 mirror=True + 标签 Right 下
+    通过朝向判定。
     """
+
+    return open_palm_points()
+
+
+def entry_back_points() -> tuple[Landmark, ...]:
+    """误进防护：同一只手手背朝镜（拇指翻到掌轴另一侧，叉积为正）。"""
 
     points = open_palm_points()
     center_x = sum(points[index].x for index in (0, 5, 9, 13, 17)) / 5
     return tuple(Landmark(2 * center_x - point.x, point.y, point.z) for point in points)
-
-
-def entry_back_points() -> tuple[Landmark, ...]:
-    """误进防护：同样五指张开，但手背朝镜（拇指落在掌轴另一侧）。"""
-
-    return open_palm_points()
 
 
 def side_palm_points() -> tuple[Landmark, ...]:
