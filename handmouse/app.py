@@ -465,12 +465,16 @@ def _worktree_mark() -> str:
     commit 只说明 HEAD 是谁，不代表跑的代码就是它——r1→r2 之间有人在未提交的
     工作区里改了阈值和检测逻辑，两轮日志却都写着同一个 commit，导致不可比。
     这里把工作区状态一起写进指纹行。
+
+    必须**上报未跟踪文件**：新逻辑写在新文件（尚未 ``git add``）里时，只比
+    tracked 改动会漏掉它，留下"hash 相同、代码不同"的盲区。``logs/`` 已在
+    ``.gitignore``，普通 untracked 模式不会把它算进来，故无需再关掉上报。
     """
 
     try:
         result = subprocess.run(
-            # 只看已跟踪文件：logs/ 里每次运行都会生成新日志，若算进去标记会一直亮。
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            # 覆盖已跟踪改动 + 未跟踪的新文件；被 gitignore 的 logs/ 不出现。
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
             cwd=Path(__file__).resolve().parent.parent,
             capture_output=True,
             text=True,
