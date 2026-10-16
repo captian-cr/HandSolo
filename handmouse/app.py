@@ -173,6 +173,13 @@ def main(argv: list[str] | None = None) -> int:
     store = ConfigStore(args.config)
     config = _apply_cli_overrides(store.load(), args)
 
+    # gate-diag 启动头：把本轮的关键判定前提（镜像约定 + 朝向幅度门槛）钉进
+    # 诊断日志文件头。① 修复后 expected_sign 由 mirror×handedness 派生，逐帧
+    # cross 行虽也带 mirror，但日志按轮单独命名归档、隔轮回看时需要一个必然
+    # 存在的运行头，避免"这一轮跑的是哪种镜像约定"无法自证。
+    if verbose_gate and args.gate_diag:
+        diag_logger.info("%s", _gate_diag_run_header(config))
+
     recorder: guided.FrameRecorder | None = None
     # gate-diag 模式：独立于完整 guided 的 30s 6 段姿势序列
     gate_diag_steps: list[tuple[float, str]] | None = None
@@ -434,6 +441,20 @@ def _worktree_mark() -> str:
     except (OSError, subprocess.SubprocessError):
         return ""  # 冻结成 EXE 后没有 git
     return "+dirty" if result.stdout.strip() else ""
+
+
+def _gate_diag_run_header(config: AppConfig) -> str:
+    """gate-diag 诊断日志的运行头：记录镜像约定与朝向幅度门槛。
+
+    ``expected_sign`` 由 ``mirror × handedness`` 派生（同一镜像下左/右手符号
+    相反），无法用单一标量表示，故此处只记录 ``mirror`` 这个输入变量本身。
+    """
+
+    return (
+        f"[gate-diag运行头] mirror={config.mirror} "
+        f"entry_palm_sin_min={config.entry_palm_sin_min:.2f} "
+        "(expected_sign 由 mirror×handedness 派生)"
+    )
 
 
 def _metrics_text(snapshot) -> str:
