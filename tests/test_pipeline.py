@@ -7,6 +7,7 @@ from handmouse.gestures import GestureEngine
 from handmouse.latest_slot import LatestSlot
 from handmouse.mouse import MouseController, NullMouseBackend
 from handmouse.pipeline import ControlWorker
+from handmouse.screen_map import ScreenMap
 
 from conftest import left_pinch_points, observation
 
@@ -14,7 +15,7 @@ BASE = 1_000_000_000
 
 
 def test_pinch_lock_cancels_pending_cursor_interpolation() -> None:
-    backend = NullMouseBackend()
+    backend = NullMouseBackend(ScreenMap(dpi_aware=False))
     engine = GestureEngine(AppConfig())
     worker = ControlWorker(
         LatestSlot(),
@@ -54,7 +55,7 @@ def test_tick_state_transition_is_reported() -> None:
     worker = ControlWorker(
         LatestSlot(),
         engine,
-        MouseController(NullMouseBackend()),
+        MouseController(NullMouseBackend(ScreenMap(dpi_aware=False))),
         threading.Event(),
         lambda gesture, paused: reported.append((gesture, paused)),
         interpolation_ms=42,

@@ -105,13 +105,12 @@ class Win32MouseBackend:
 
     def __init__(
         self,
-        config: AppConfig | None = None,
-        screen_map: ScreenMap | None = None,
+        config: AppConfig,
+        screen_map: ScreenMap,
     ) -> None:
         if os.name != "nt":
             raise RuntimeError("手势鼠标的鼠标注入仅支持 Windows")
-        config = config or AppConfig()
-        self.screen_map = screen_map or ScreenMap(multi_monitor=False)
+        self.screen_map = screen_map
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._user32.SendInput.argtypes = (
             wintypes.UINT,
@@ -274,8 +273,8 @@ class NullMouseBackend:
     状态机、确认动作序列，同时保证系统光标不被接管。
     """
 
-    def __init__(self, screen_map: ScreenMap | None = None) -> None:
-        self.screen_map = screen_map or ScreenMap(dpi_aware=False)
+    def __init__(self, screen_map: ScreenMap) -> None:
+        self.screen_map = screen_map
         self.commands: list[tuple[str, tuple[object, ...]]] = []
 
     def _record(self, name: str, *args: object) -> None:
