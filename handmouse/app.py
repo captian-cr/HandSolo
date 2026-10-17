@@ -100,7 +100,7 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "--sign-ref",
         action="store_true",
         help="掌/背朝向符号参照：4 姿势（右手掌/右手背/左手掌/左手背）× 5s"
-        " + 3 个 2s 换姿势间隙的定点序列，采集 handedness/cross/sin 参照样本。"
+        " + 3 个 4s 换姿势间隙的定点序列，采集 handedness/cross/sin 参照样本。"
         "隐含 --safe-mode。"
         "需同时设置环境变量 HANDMOUSE_SIGN_REF=1 才会输出诊断日志"
         "（该开关只加诊断日志、不改任何判定）。",
