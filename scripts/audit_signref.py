@@ -179,7 +179,17 @@ def segment(frames: list[Frame], header: dict) -> list[SegInfo]:
 
 
 def _palm_like_ratio(frames: list[Frame], fmt: str, mirror: bool) -> tuple[float, int]:
-    """门无关姿势判据匹配率（见 docstring 口径 3）。返回 (匹配率, 判据帧数)。"""
+    """门无关姿势判据匹配率（见 docstring 口径 3）。返回 (匹配率, 判据帧数)。
+
+    新格式用 nz 符号 × expected_sign(hn, mirror) 匹配率，不用 palm_presented
+    （① 语义变更后开闸即恒 False，拿它分类会把已开闸掌段误判成背段，
+    曾报出 96.8% 假拒绝率）。
+
+    已知失效条件：hn 本身错了（KI-001 冻结 / KI-002 翻转）时 expected_sign
+    也错，分类随之失效——审计结论只在 hn 可信时成立。遇到 hn 与几何明显
+    矛盾的段（如 nz 全负但报 hn=Left）应标 hn_suspect 而非直接给 verdict；
+    该标记暂未实现，遇实例再补。
+    """
 
     if fmt == "old":
         judged = [f for f in frames if f.palm_presented is not None]
@@ -235,6 +245,10 @@ def _analyze(
                 break
             lost += 1
         info.gap_lost = lost
+        # gap 干净判据：出现任一 state=lost 帧即判干净。
+        # 依据：状态机要 hand_count=0 持续 hand_lost_ms(200ms) 才迁移到 lost，
+        # 所以 lost 帧本身自证 ≥200ms 无手。不额外校验 lost 跨帧时长，
+        # 避免 8.5fps 下“1 帧 lost + 立即回画”的干净 gap 被误杀。
         info.gap_handlost = lost > 0
 
     skips: list[str] = []

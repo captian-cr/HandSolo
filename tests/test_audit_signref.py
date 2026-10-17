@@ -172,6 +172,23 @@ def test_full_run_all_pass(tmp_path: Path) -> None:
     assert out.count("| PASS |") == 4
 
 
+def test_single_lost_frame_gap_is_clean(tmp_path: Path) -> None:
+    """边界：重入首帧仅 1 帧 lost（次帧即回画有手）→ gap 判干净，不误杀。
+
+    状态机要 hand_count=0 持续 hand_lost_ms(200ms) 才迁移到 lost，故 1 帧
+    lost 已自证 ≥200ms 无手，不额外要求 lost 跨帧时长（8.5fps 下“1 帧
+    lost + 立即回画”的干净 gap 真实存在）。此前由 test_full_run_all_pass
+    的 “| 1 | 1 | … | ✓” 断言隐式覆盖，显式化防重构回归。"""
+    b = LogBuilder().header()
+    b.segment(60, True, gate_open_at=20, hn="Left", nz=0.85)
+    b.gap()  # 空洞 4.0s + 重入首帧恰好 1 帧 state=lost，次帧起恢复 idle
+    b.segment(60, False, hn="Left", nz=-0.85)
+    out = run_audit(b.write(tmp_path / "sign-ref-t.log"))
+    assert "| 1 | 1 | 4.03 | ✓ | seg2 |" in out
+    assert "| seg2 | 背 | 背 | 60 |" in out and "| PASS |" in out
+    assert "SKIP 段：无" in out
+
+
 def test_brief_reentry_merges_segments_and_skips(tmp_path: Path) -> None:
     """gap3 手回画太早（空洞 0.3s < GAP_MIN_S，hand_lost 未触发）：
     seg3/seg4 融合为一个检测连续段，掌/背判据各半 → 混合 SKIP，
