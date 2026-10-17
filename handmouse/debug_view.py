@@ -163,6 +163,9 @@ def build_view(
     ]
     if banner is not None:
         rows.insert(0, banner)
+    # VERBOSE_GATE 下追加引擎/采集层 debug 行（灰色小字）。
+    for line in snapshot.debug_lines:
+        rows.append((line, GRAY))
     draw_hud(view, rows)
     return view
 

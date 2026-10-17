@@ -201,6 +201,7 @@ class CameraWorker(threading.Thread):
         on_error: Callable[[str], None],
         on_frame: Callable[[FramePacket], None],
         on_warning: Callable[[str], None] | None = None,
+        on_diag: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(name="camera-capture", daemon=True)
         self.config = config
@@ -211,6 +212,8 @@ class CameraWorker(threading.Thread):
         # 非致命告警通道。摄像头拔插属于外设事件，不能走 on_error——
         # GesturePipeline._set_error 会直接停掉流水线并释放按键，插回去也回不来。
         self.on_warning = on_warning or (lambda message: LOGGER.warning(message))
+        # 诊断事件回调（如 suspicious_empty），供 HUD debug 层读取。
+        self.on_diag = on_diag or (lambda _kind: None)
 
     def _open_camera(self) -> cv2.VideoCapture:
         backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
@@ -341,6 +344,7 @@ class CameraWorker(threading.Thread):
                             "[read] suspicious empty frame seq=%d std=%.3f read_ms=%.1f",
                             sequence, raw_std, read_ms,
                         )
+                        self.on_diag("suspicious_empty")
                 if self.config.mirror:
                     frame = cv2.flip(frame, 1)
                 brightness = self._brightness(frame)

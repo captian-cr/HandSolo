@@ -192,6 +192,8 @@ class GesturePipeline:
         self._detection_results: deque[tuple[int, bool]] = deque(maxlen=180)
         self._packets_total = 0
         self._hand_packets_total = 0
+        # 摄像头可疑空帧累计次数（VERBOSE_GATE 下 HUD debug 用）。
+        self._suspicious_empty_count = 0
 
     @property
     def running(self) -> bool:
@@ -214,6 +216,12 @@ class GesturePipeline:
             self._captured_frames += 1
             self._snapshot.low_light = packet.brightness < 55.0
             self._snapshot.camera_signal_missing = packet.brightness < 12.0
+
+    def _on_camera_diag(self, kind: str) -> None:
+        """CameraWorker 诊断事件回调（当前仅 suspicious_empty）。"""
+
+        if kind == "suspicious_empty":
+            self._suspicious_empty_count += 1
 
     def _on_detection(self, packet: DetectionPacket) -> None:
         self._inference_rate.mark()
@@ -316,6 +324,7 @@ class GesturePipeline:
             self.stop_event,
             self._set_error,
             self._on_frame,
+            self._on_camera_diag,
         )
         landmarker = HandLandmarkerWorker(
             self.config,
@@ -433,7 +442,38 @@ class GesturePipeline:
                 }
             ):
                 snapshot.message = f"已吸附：{snapshot.snap_target_name}"
+            # HUD 调试行（VERBOSE_GATE 开启时由 debug_view 读取渲染）。
+            snapshot.debug_lines = self._build_debug_lines(now)
             return snapshot
+
+    def _build_debug_lines(self, now: int) -> list[str]:
+        """组装 HUD debug 行。VERBOSE_GATE 关闭时返回空列表。"""
+
+        import os
+
+        verbose = os.environ.get("HANDMOUSE_VERBOSE_GATE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not verbose:
+            return []
+
+        lines = [
+            f"drag_gain={self.config.drag_gain:.1f} "
+            f"double_click_window_ms={self.config.double_click_window_ms} "
+            f"traj_correction={'on' if self.config.enable_trajectory_correction else 'off'}",
+        ]
+
+        flip = self.engine._last_flip_info
+        if flip is not None:
+            from_label, to_label, wrist_dist, sec_ago, _ts = flip
+            lines.append(
+                f"flip {from_label}->{to_label} dist={wrist_dist:.3f} {sec_ago:.1f}s ago",
+            )
+        else:
+            lines.append("flip --")
+
+        lines.append(f"suspicious_empty={self._suspicious_empty_count}")
+        return lines
 
     def _sample_resources(self, now: int) -> None:
         """CPU/内存按 1Hz 采样；没有 psutil 时静默跳过。"""

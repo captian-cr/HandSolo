@@ -165,3 +165,5 @@ class PipelineSnapshot:
     camera_error: str | None = None
     snap_target_name: str | None = None
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)
+    # HUD 调试行（VERBOSE_GATE 开启时由 pipeline 组装）。
+    debug_lines: list[str] = field(default_factory=list)
