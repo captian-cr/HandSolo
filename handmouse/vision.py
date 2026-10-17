@@ -328,6 +328,19 @@ class CameraWorker(threading.Thread):
                     continue
 
                 consecutive_failures = 0
+                if VERBOSE_GATE:
+                    # ok=True 但内容近全黑/全灰（驱动交空缓冲）：只记日志不改判定，
+                    # 不累加 consecutive_failures——是否计入是另一笔的事。
+                    # 采样原始帧（flip/低光增强之前），观测的是驱动交付物本身。
+                    # raw_std < 1.0 是初值：纯黑/纯灰 std≈0，带噪驱动交付物通常 std > 2。
+                    # 观测后若从未触发，说明该故障模式在本机不存在，可删此段；
+                    # 若触发但伴随明显可见画面，说明阈值偏松，需下调。
+                    raw_std = float(frame[::16, ::16].std())
+                    if raw_std < 1.0:
+                        _DIAG_LOGGER.info(
+                            "[read] suspicious empty frame seq=%d std=%.3f read_ms=%.1f",
+                            sequence, raw_std, read_ms,
+                        )
                 if self.config.mirror:
                     frame = cv2.flip(frame, 1)
                 brightness = self._brightness(frame)
