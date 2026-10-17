@@ -335,6 +335,9 @@ class GestureEngine:
         self._left_pinch_y: float | None = None
         # 因双击窗口到期而提前生成的单击，随当前帧的命令一起交付。
         self._due_commands: list[MouseCommand] = []
+        # KI-002 观测状态：(label, wrist_x, wrist_y, arrival_ns)，仅 VERBOSE_GATE/
+        # SIGN_REF 下维护，用于 [handedness-flip] 日志；不碰任何判定路径。
+        self._last_obs_handedness: tuple[str, float, float, int] | None = None
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -645,6 +648,34 @@ class GestureEngine:
         # 算成经过时间，10Hz 下即可逼近甚至越过 hand_lost_ms 而假性失联。
         arrival_ns = monotonic_ns()
         points = observation.landmarks
+        # KI-002 观测：追踪链内存活期的 handedness 翻转（只记日志，不改判定）。
+        # 必须位于下方 handedness 过滤器之前——config.handedness != "Any" 时
+        # 翻转帧会被过滤器按「无有效观测」吞掉，放过滤器后恰好漏掉最该观测的
+        # 事件。Δt ≤ 500ms 才算翻转：间隙回画（lost 后重检采纳新标签）不计，
+        # 窗口初拟值见 docs/known-issues.md KI-002。
+        if (VERBOSE_GATE or SIGN_REF) and observation.handedness and len(points) >= 1:
+            wrist = points[0]
+            prev = self._last_obs_handedness
+            if prev is not None:
+                prev_label, prev_x, prev_y, prev_ns = prev
+                if (
+                    observation.handedness != prev_label
+                    and arrival_ns - prev_ns <= 500_000_000
+                ):
+                    dist = ((wrist.x - prev_x) ** 2 + (wrist.y - prev_y) ** 2) ** 0.5
+                    _DIAG_LOGGER.info(
+                        "[handedness-flip] %s->%s wrist_dist=%.4f dt_ms=%d",
+                        prev_label,
+                        observation.handedness,
+                        dist,
+                        (arrival_ns - prev_ns) // 1_000_000,
+                    )
+            self._last_obs_handedness = (
+                observation.handedness,
+                wrist.x,
+                wrist.y,
+                arrival_ns,
+            )
         if self.config.handedness != "Any" and observation.handedness:
             if observation.handedness != self.config.handedness:
                 # handedness 不符时本帧按"无有效观测"处理，同样交给墙钟。

@@ -1188,3 +1188,68 @@ def test_sign_ref_line_carries_handedness_score(monkeypatch, caplog) -> None:
     ]
     assert any("hn=Right" in line and "hn_score=0.9800" in line for line in messages)
     assert any("nz_unit=N/A" in line and "hn_score=0.4200" in line for line in messages)
+
+
+def _flip_observation(points, handedness: str, timestamp_ns: int) -> HandObservation:
+    return HandObservation(
+        landmarks=points,
+        handedness=handedness,
+        timestamp_ns=timestamp_ns,
+        inference_ms=12.0,
+        handedness_score=0.98,
+    )
+
+
+def test_handedness_flip_logged_before_filter(monkeypatch, caplog, arrival_clock) -> None:
+    """KI-002 观测点必须在 handedness 过滤器之前。
+
+    config.handedness="Right" 时 Right→Left 翻转帧被过滤器按「无有效观测」
+    吞掉；观测若放过滤器之后等于漏掉最该观测的事件。本测试是问题 A 的
+    验收判据：被吞的帧仍须留下 [handedness-flip] 记录。"""
+    from handmouse import gestures as gestures_module
+
+    monkeypatch.setattr(gestures_module, "VERBOSE_GATE", True)
+    engine = GestureEngine(AppConfig(handedness="Right"))
+    points = entry_palm_points()
+    with caplog.at_level(logging.INFO, logger="handmouse.gate-diag"):
+        engine.process(observation(points, BASE))  # Right，通过过滤器
+        arrival_clock.advance_ms(100)
+        # Left，被过滤器吞——但翻转事件必须先于过滤被记录
+        engine.process(_flip_observation(points, "Left", BASE + 100_000_000))
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("[handedness-flip] Right->Left" in m for m in messages)
+
+
+def test_handedness_flip_within_window_logged(monkeypatch, caplog, arrival_clock) -> None:
+    """追踪链内存活期（Δt ≤ 500ms）的标签翻转 → 记日志，含腕部位移与 dt。"""
+    from handmouse import gestures as gestures_module
+
+    monkeypatch.setattr(gestures_module, "VERBOSE_GATE", True)
+    engine = GestureEngine(AppConfig())
+    points = entry_palm_points()
+    with caplog.at_level(logging.INFO, logger="handmouse.gate-diag"):
+        engine.process(observation(points, BASE))
+        arrival_clock.advance_ms(100)
+        engine.process(_flip_observation(points, "Left", BASE + 100_000_000))
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "[handedness-flip] Right->Left wrist_dist=" in m and "dt_ms=100" in m
+        for m in messages
+    )
+
+
+def test_handedness_flip_outside_window_not_logged(monkeypatch, caplog, arrival_clock) -> None:
+    """Δt > 500ms 的标签变化是间隙回画（lost 后重检采纳新标签），不算翻转。
+
+    协议间隙 4s 完全出画，回画标签变化是 KI-002 设计里的正常行为；无时间窗
+    会把每次回画记成假事件。与上一条配套才有牙：单看本条，无实现时也通过。"""
+    from handmouse import gestures as gestures_module
+
+    monkeypatch.setattr(gestures_module, "VERBOSE_GATE", True)
+    engine = GestureEngine(AppConfig())
+    points = entry_palm_points()
+    with caplog.at_level(logging.INFO, logger="handmouse.gate-diag"):
+        engine.process(observation(points, BASE))
+        arrival_clock.advance_ms(600)
+        engine.process(_flip_observation(points, "Left", BASE + 600_000_000))
+    assert not any("[handedness-flip]" in r.getMessage() for r in caplog.records)
