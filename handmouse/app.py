@@ -520,6 +520,8 @@ def _sign_ref_run_header(config: AppConfig) -> str:
         f"entry_palm_nz_min={config.entry_palm_nz_min:.2f} "
         f"entry_palm_nz_commit={config.entry_palm_nz_commit:.2f} "
         f"entry_facing_commit_frames={config.entry_facing_commit_frames} "
+        f"traj_correction={'on' if config.enable_trajectory_correction else 'off'} "
+        f"wrist_dist_thresh={config.trajectory_correction_wrist_dist:.2f} "
         "（仅参照模式：只加诊断日志、不改任何判定）"
     )
 
