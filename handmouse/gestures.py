@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import acos, degrees, hypot, sqrt
 from time import monotonic_ns
@@ -338,6 +338,12 @@ class GestureEngine:
         # KI-002 观测状态：(label, wrist_x, wrist_y, arrival_ns)，仅 VERBOSE_GATE/
         # SIGN_REF 下维护，用于 [handedness-flip] 日志；不碰任何判定路径。
         self._last_obs_handedness: tuple[str, float, float, int] | None = None
+        # KI-002 轨迹纠正状态：(adopted_label, wrist_x, wrist_y, arrival_ns)。
+        # 与观测日志独立——默认关闭时仍维护，保证开闸即用。
+        self._trajectory_state: tuple[str, float, float, int] | None = None
+        # 最近一次 handedness 翻转事件（供 HUD debug 层读取）：
+        # (from_label, to_label, wrist_dist, seconds_ago, timestamp_ns)
+        self._last_flip_info: tuple[str, str, float, float, int] | None = None
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -444,6 +450,63 @@ class GestureEngine:
             self._candidate_facing = None
             self._candidate_count = 0
         return self._locked_facing
+
+    def _stabilize_handedness(
+        self,
+        handedness: str,
+        points: tuple[Landmark, ...],
+        arrival_ns: int,
+    ) -> str:
+        """KI-002 轨迹纠正：同一 wrist 轨迹下标签翻转 → 继承上一帧标签。
+
+        只在 wrist 位移 < ``trajectory_correction_wrist_dist`` 且时间差
+        ≤ ``trajectory_correction_window_ms`` 时认为属于同一追踪链；
+        大跳跃或超时视为换手/追踪断裂，采纳 MediaPipe 新标签。
+
+        默认关闭（``enable_trajectory_correction=False`` 时直接透传）。
+        开关闭时仍维护 ``_trajectory_state``，保证开闸即用、不丢锚点。
+        """
+
+        if not self.config.enable_trajectory_correction:
+            if points and handedness:
+                self._trajectory_state = (handedness, points[0].x, points[0].y, arrival_ns)
+            else:
+                self._trajectory_state = None
+            return handedness
+
+        if not points or not handedness:
+            self._trajectory_state = None
+            return handedness
+
+        wrist = points[0]
+        prev = self._trajectory_state
+        if prev is None:
+            self._trajectory_state = (handedness, wrist.x, wrist.y, arrival_ns)
+            return handedness
+
+        prev_label, prev_x, prev_y, prev_ns = prev
+        dt_ms = (arrival_ns - prev_ns) / 1_000_000
+        dist = hypot(wrist.x - prev_x, wrist.y - prev_y)
+
+        # 时间窗口外：追踪链断裂，采纳新标签。
+        if dt_ms > self.config.trajectory_correction_window_ms:
+            self._trajectory_state = (handedness, wrist.x, wrist.y, arrival_ns)
+            return handedness
+
+        # 标签未变：正常更新锚点。
+        if handedness == prev_label:
+            self._trajectory_state = (handedness, wrist.x, wrist.y, arrival_ns)
+            return handedness
+
+        # 标签变了且 wrist 距离在阈值内：同一追踪链的翻转，纠正为上一帧标签。
+        # 锚点坐标仍推进到当前帧，避免手移动后 dist 从旧坐标算假性超标。
+        if dist < self.config.trajectory_correction_wrist_dist:
+            self._trajectory_state = (prev_label, wrist.x, wrist.y, arrival_ns)
+            return prev_label
+
+        # 大跳跃：换手，采纳新标签。
+        self._trajectory_state = (handedness, wrist.x, wrist.y, arrival_ns)
+        return handedness
 
     def _palm_presented(
         self,
@@ -648,6 +711,17 @@ class GestureEngine:
         # 算成经过时间，10Hz 下即可逼近甚至越过 hand_lost_ms 而假性失联。
         arrival_ns = monotonic_ns()
         points = observation.landmarks
+
+        # ---- KI-002 轨迹纠正（默认关） ----
+        # 必须在 handedness 过滤器之前：纠正后标签与 config.handedness 匹配才允许
+        # 进入后续判定。观测日志（下方）与纠正逻辑共用 _trajectory_state，保证
+        # "日志看到的翻转"就是"被纠正的那个翻转"。
+        corrected = self._stabilize_handedness(
+            observation.handedness, points, arrival_ns,
+        )
+        if corrected != observation.handedness:
+            observation = replace(observation, handedness=corrected)
+
         # KI-002 观测：追踪链内存活期的 handedness 翻转（只记日志，不改判定）。
         # 必须位于下方 handedness 过滤器之前——config.handedness != "Any" 时
         # 翻转帧会被过滤器按「无有效观测」吞掉，放过滤器后恰好漏掉最该观测的
@@ -669,6 +743,14 @@ class GestureEngine:
                         observation.handedness,
                         dist,
                         (arrival_ns - prev_ns) // 1_000_000,
+                    )
+                    # 同时记录供 HUD debug 层读取。
+                    self._last_flip_info = (
+                        prev_label,
+                        observation.handedness,
+                        dist,
+                        (arrival_ns - prev_ns) / 1_000_000_000,
+                        arrival_ns,
                     )
             self._last_obs_handedness = (
                 observation.handedness,

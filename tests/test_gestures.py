@@ -1253,3 +1253,72 @@ def test_handedness_flip_outside_window_not_logged(monkeypatch, caplog, arrival_
         arrival_clock.advance_ms(600)
         engine.process(_flip_observation(points, "Left", BASE + 600_000_000))
     assert not any("[handedness-flip]" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# KI-002 轨迹纠正
+# ---------------------------------------------------------------------------
+
+
+def test_trajectory_correction_suppresses_flip(arrival_clock) -> None:
+    """同一 wrist 轨迹下标签翻转 → 纠正为上一帧标签（默认关时透传）。"""
+    engine = GestureEngine(AppConfig(enable_trajectory_correction=True))
+    points = entry_palm_points()
+
+    # 帧1：Right，建立轨迹锚点。
+    engine.process(observation(points, BASE))
+    assert engine._trajectory_state is not None
+    assert engine._trajectory_state[0] == "Right"
+
+    # 帧2：Left，wrist 微移（dist≈0.014 < 0.15），Δt=100ms ≤ 500ms。
+    arrival_clock.advance_ms(100)
+    shifted = tuple(Landmark(p.x + 0.01, p.y + 0.01, p.z) for p in points)
+    engine.process(_flip_observation(shifted, "Left", BASE + 100_000_000))
+    # 纠正后实际采纳的 handedness 仍为 Right（引擎内部状态已锁定）。
+    assert engine._trajectory_state[0] == "Right"
+
+
+def test_trajectory_correction_accepts_large_jump(arrival_clock) -> None:
+    """wrist 大跳跃（dist > 阈值）视为换手，采纳新标签。"""
+    engine = GestureEngine(AppConfig(enable_trajectory_correction=True))
+    points = entry_palm_points()
+
+    engine.process(observation(points, BASE))
+    assert engine._trajectory_state[0] == "Right"
+
+    # 帧2：Left，wrist 大跳跃（dx=0.30 > 0.15），Δt=100ms。
+    arrival_clock.advance_ms(100)
+    shifted = tuple(Landmark(p.x + 0.30, p.y, p.z) for p in points)
+    engine.process(_flip_observation(shifted, "Left", BASE + 100_000_000))
+    # 换手后采纳新标签。
+    assert engine._trajectory_state[0] == "Left"
+
+
+def test_trajectory_correction_accepts_after_window(arrival_clock) -> None:
+    """时间窗口外（Δt > 500ms）视为追踪链断裂，采纳新标签。"""
+    engine = GestureEngine(AppConfig(enable_trajectory_correction=True))
+    points = entry_palm_points()
+
+    engine.process(observation(points, BASE))
+    assert engine._trajectory_state[0] == "Right"
+
+    # 帧2：Left，wrist 微移，但 Δt=600ms > 500ms。
+    arrival_clock.advance_ms(600)
+    shifted = tuple(Landmark(p.x + 0.01, p.y, p.z) for p in points)
+    engine.process(_flip_observation(shifted, "Left", BASE + 600_000_000))
+    assert engine._trajectory_state[0] == "Left"
+
+
+def test_trajectory_correction_disabled_by_default(arrival_clock) -> None:
+    """默认关闭：标签翻转直接透传，不纠正。"""
+    engine = GestureEngine(AppConfig())
+    points = entry_palm_points()
+
+    engine.process(observation(points, BASE))
+    assert engine._trajectory_state is not None
+
+    arrival_clock.advance_ms(100)
+    shifted = tuple(Landmark(p.x + 0.01, p.y, p.z) for p in points)
+    engine.process(_flip_observation(shifted, "Left", BASE + 100_000_000))
+    # 关闭时仍维护锚点（供开闸即用），但透传标签。
+    assert engine._trajectory_state[0] == "Left"

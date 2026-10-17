@@ -107,6 +107,14 @@ class AppConfig:
     # K 与 commit 一次只调一个变量，否则无法归因是哪个起作用。
     entry_facing_commit_frames: int = 8
 
+    # ---- KI-002 轨迹纠正（默认关，实机观测到 handedness 翻转频繁时打开） ----
+    enable_trajectory_correction: bool = False
+    # 同一 wrist 轨迹下标签翻转纠正的 wrist 距离阈值（归一化画面坐标）。
+    # 小于此值视为同一追踪目标连续运动，继承上一帧 handedness。
+    trajectory_correction_wrist_dist: float = 0.15
+    # 轨迹纠正的时间窗口（ms）。超过此窗口未更新视为追踪链断裂，采纳新标签。
+    trajectory_correction_window_ms: int = 500
+
     # ---- 局部续跟踪 ----
     partial_finger_tracking: bool = True
     # 0 表示只按光流质量决定续跟踪寿命；正数用于诊断或保守限时。
@@ -175,6 +183,12 @@ class AppConfig:
         self.min_detection_confidence = max(0.25, min(0.90, float(self.min_detection_confidence)))
         self.min_presence_confidence = max(0.25, min(0.90, float(self.min_presence_confidence)))
         self.min_tracking_confidence = max(0.25, min(0.90, float(self.min_tracking_confidence)))
+        self.trajectory_correction_wrist_dist = max(
+            0.05, min(0.5, float(self.trajectory_correction_wrist_dist)),
+        )
+        self.trajectory_correction_window_ms = max(
+            100, min(2000, int(self.trajectory_correction_window_ms)),
+        )
         self.cursor_snap_radius_px = max(12, min(80, int(self.cursor_snap_radius_px)))
         if self.handedness not in {"Left", "Right", "Any"}:
             self.handedness = "Right"
