@@ -32,3 +32,38 @@ MediaPipe 伪深度 z 不足以区分。
 
 **状态**：挂起（documented，not fixed）。hn_score 门槛方案已排除
 （正确锚首帧分布 0.600–0.998 完全覆盖错锚 0.665）。
+
+## KI-002 镜像模式下 Handedness 标签翻转（翻手/换手时）
+
+**症状**：MediaPipe 在追踪链存活期内，handedness 可能不是稳定冻结，
+而是在特定动作（如手部翻转、快速移动）时发生标签翻转（Left ↔ Right）。
+
+**根因**：KI-001 记录了「冻结」。KI-002 补充其另一面：MediaPipe 的
+HandLandmarker 在镜像输入（pixel flip 后）下，标签判定在视野边缘或
+翻手过渡期不稳定，可能在几帧内发生 Left → Right 的来回跳变。
+
+**为什么方向 2（几何法）不能解**：
+几何量在背姿势下不可分，且 L-back 与 R-palm 几何同构。直接用几何
+替代 label 会导致 H4 退化（见 KI-001「方向 2 出局分析」）。
+
+**借鉴方案：基于轨迹连续性的 handedness 纠正**
+参考开源实现 EgoDaO 的 hand tracker：
+> Handedness stabilisation: when MediaPipe flips left/right labels,
+> corrects based on wrist proximity to the previous track.
+
+核心思路：不依赖每一帧重新判断「这是哪只手」，而是跟踪腕部（wrist）
+位置。如果当前帧手腕坐标与上一帧的手腕坐标距离在阈值内（视为同一
+跟踪目标的连续运动），则强制继承上一帧的 label，无视 MediaPipe 的翻转。
+只有当手腕位置发生大跳跃（换手）或追踪中断（lost 后重检），才采纳
+MediaPipe 的新标签。
+
+**为什么它不会退化成 H4 误开**：
+轨迹连续性是**时间维度的约束**，不是几何维度的约束。它不改变当前帧
+的掌/背判定，只在跨帧层面修正手别标签的抖动。即使左手背几何被误判
+为右掌，时间连续性会纠正 label，而不会绕过 H4 的手背拒绝逻辑。
+
+**状态**：挂起（documented，proposed solution ready）。未实机验证，
+优先级低（仅在翻手过渡期出现，且不影响稳态）。落地前需先以 debug
+日志观测实机翻转频率与腕部位移量级，标定距离阈值（初拟 0.15 归一化
+坐标）与匹配窗口（初拟 500ms），并配「同一手腕轨迹下标签翻转 →
+纠正生效」的回归单测。
