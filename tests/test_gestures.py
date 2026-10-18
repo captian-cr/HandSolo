@@ -1322,3 +1322,100 @@ def test_trajectory_correction_disabled_by_default(arrival_clock) -> None:
     engine.process(_flip_observation(shifted, "Left", BASE + 100_000_000))
     # 关闭时仍维护锚点（供开闸即用），但透传标签。
     assert engine._trajectory_state[0] == "Left"
+
+
+# ==================== 摇杆式光标 ====================
+
+
+def test_joystick_deadzone_keeps_cursor_still() -> None:
+    """食指尖在中心死区内时，摇杆光标不动（过滤生理手抖）。"""
+
+    engine = GestureEngine(AppConfig(cursor_joystick_enabled=True))
+    engine._last_smoothed = (0.5, 0.5)
+
+    center = Landmark(0.50, 0.50)
+    # 第一帧初始化摇杆位置到当前光标 (0.5, 0.5)。
+    assert engine._joystick_update(center, 1_000_000_000) == (0.5, 0.5)
+    # 第二帧仍在死区内：位置不变。
+    assert engine._joystick_update(center, 1_100_000_000) == (0.5, 0.5)
+
+
+def test_joystick_moves_in_direction_of_finger() -> None:
+    """食指尖偏离中心时，光标向该方向移动（x 增大 = 向右）。"""
+
+    engine = GestureEngine(AppConfig(cursor_joystick_enabled=True))
+    engine._last_smoothed = (0.5, 0.5)
+
+    engine._joystick_update(Landmark(0.50, 0.50), 1_000_000_000)
+    x, y = engine._joystick_update(Landmark(0.70, 0.50), 1_100_000_000)
+    assert x > 0.5
+    assert abs(y - 0.5) < 1e-6
+
+
+def test_joystick_speed_multiplier_scales_movement() -> None:
+    """速度倍数越大，相同时间内光标移动越远。"""
+
+    def run(multiplier: float) -> float:
+        engine = GestureEngine(
+            AppConfig(cursor_joystick_enabled=True, cursor_speed_multiplier=multiplier),
+        )
+        engine._last_smoothed = (0.5, 0.5)
+        engine._joystick_update(Landmark(0.50, 0.50), 1_000_000_000)
+        x, _ = engine._joystick_update(Landmark(0.70, 0.50), 1_100_000_000)
+        return x
+
+    assert run(2.0) > run(1.0) > 0.5
+
+
+def test_joystick_dt_clamped_to_200ms() -> None:
+    """卡顿（dt > 200ms）时光标位移被钳制，不会飞出去。"""
+
+    engine = GestureEngine(
+        AppConfig(cursor_joystick_enabled=True, cursor_max_speed=5.0),
+    )
+    engine._last_smoothed = (0.5, 0.5)
+
+    engine._joystick_update(Landmark(0.50, 0.50), 1_000_000_000)
+    # dt=1000ms（严重卡顿），实际位移应按 200ms 计算。
+    x, _ = engine._joystick_update(Landmark(0.70, 0.50), 2_000_000_000)
+    # 即使 max_speed=5.0、dt 名义 1s，钳制后位移不超过 5.0 * 0.2 = 1.0。
+    assert x <= 1.0
+
+
+def test_joystick_reinitializes_after_idle() -> None:
+    """摇杆闲置超过 500ms 后重新锚定到当前光标位置，避免跳变。"""
+
+    engine = GestureEngine(AppConfig(cursor_joystick_enabled=True))
+    engine._last_smoothed = (0.3, 0.7)
+
+    engine._joystick_update(Landmark(0.50, 0.50), 1_000_000_000)
+    # 闲置 600ms 后回到摇杆：位置应重新锚定为 (0.3, 0.7)。
+    engine._last_smoothed = (0.3, 0.7)
+    x, y = engine._joystick_update(Landmark(0.70, 0.50), 1_600_000_000)
+    assert (x, y) == (0.3, 0.7)
+
+
+def test_pointer_uses_joystick_when_enabled(arrival_clock) -> None:
+    """POINTER 路径在摇杆开启时使用摇杆算法，关闭时走绝对映射。"""
+
+    points = pointer_points()  # 食指尖 (0.42, 0.20)，偏离画面中心
+
+    # 摇杆开启：第一帧初始化摇杆到 (0.5, 0.5)，后续帧按偏移累加。
+    engine_on = GestureEngine(AppConfig(cursor_joystick_enabled=True))
+    first = engine_on.process(observation(points, BASE))
+    move_first = [c for c in first if c.kind == MouseCommandType.MOVE][0]
+    assert move_first.x == 0.5
+
+    # 第二帧：食指尖偏向左上方，光标应向左上方移动。
+    arrival_clock.advance_ms(100)
+    second = engine_on.process(observation(points, BASE + 100_000_000))
+    move_second = [c for c in second if c.kind == MouseCommandType.MOVE][0]
+    assert move_second.x < 0.5  # 食指尖 x=0.42 < 0.5，光标向左
+    assert move_second.y < 0.5  # 食指尖 y=0.20 < 0.5，光标向上
+
+    # 摇杆关闭：绝对映射，食指尖直接映射到屏幕坐标。
+    engine_off = GestureEngine(AppConfig(cursor_joystick_enabled=False))
+    commands_off = engine_off.process(observation(points, BASE))
+    move_off = [c for c in commands_off if c.kind == MouseCommandType.MOVE][0]
+    # 绝对映射下食指尖在画面左侧，映射到屏幕左侧。
+    assert move_off.x < 0.5

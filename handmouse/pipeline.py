@@ -463,6 +463,16 @@ class GesturePipeline:
             f"traj_correction={'on' if self.config.enable_trajectory_correction else 'off'}",
         ]
 
+        # 摇杆模式状态：显示开关与速度倍数，方便实机调参。
+        if self.config.cursor_joystick_enabled:
+            lines.append(
+                f"joystick=on speed={self.config.cursor_speed_multiplier:.1f}x "
+                f"deadzone={self.config.cursor_deadzone_radius:.2f} "
+                f"max={self.config.cursor_max_speed:.1f}",
+            )
+        else:
+            lines.append("joystick=off (absolute mapping)")
+
         flip = self.engine._last_flip_info
         if flip is not None:
             from_label, to_label, wrist_dist, sec_ago, _ts = flip

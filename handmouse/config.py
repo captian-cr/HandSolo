@@ -115,6 +115,17 @@ class AppConfig:
     # 轨迹纠正的时间窗口（ms）。超过此窗口未更新视为追踪链断裂，采纳新标签。
     trajectory_correction_window_ms: int = 500
 
+    # ---- 摇杆式光标（默认关，实机验证体感后再决定转正） ----
+    # 与绝对映射的本质区别：输入是食指尖偏离画面中心的方向+幅度，
+    # 输出是速度，位置靠帧间累加。手臂可保持稳定，只动手指。
+    cursor_joystick_enabled: bool = False
+    # 中心死区半径（画面宽度比例）：偏离小于此值时光标不动，过滤生理手抖。
+    cursor_deadzone_radius: float = 0.06
+    # 满速时光标每秒移动的归一化距离（1.0 = 1 秒从屏左移到屏右）。
+    cursor_max_speed: float = 1.0
+    # 用户自定义速度倍数：填 1.5 整体快 50%，填 2.0 翻倍。
+    cursor_speed_multiplier: float = 1.0
+
     # ---- 局部续跟踪 ----
     partial_finger_tracking: bool = True
     # 0 表示只按光流质量决定续跟踪寿命；正数用于诊断或保守限时。
@@ -189,6 +200,9 @@ class AppConfig:
         self.trajectory_correction_window_ms = max(
             100, min(2000, int(self.trajectory_correction_window_ms)),
         )
+        self.cursor_deadzone_radius = max(0.0, min(0.3, float(self.cursor_deadzone_radius)))
+        self.cursor_max_speed = max(0.1, min(5.0, float(self.cursor_max_speed)))
+        self.cursor_speed_multiplier = max(0.2, min(5.0, float(self.cursor_speed_multiplier)))
         self.cursor_snap_radius_px = max(12, min(80, int(self.cursor_snap_radius_px)))
         if self.handedness not in {"Left", "Right", "Any"}:
             self.handedness = "Right"

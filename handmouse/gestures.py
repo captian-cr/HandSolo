@@ -344,6 +344,12 @@ class GestureEngine:
         # 最近一次 handedness 翻转事件（供 HUD debug 层读取）：
         # (from_label, to_label, wrist_dist, seconds_ago, timestamp_ns)
         self._last_flip_info: tuple[str, str, float, float, int] | None = None
+        # ---- 摇杆式光标状态（cursor_joystick_enabled 时生效） ----
+        # 内部维护的光标位置（屏幕归一化坐标），靠帧间速度累加推进。
+        self._joystick_x: float = 0.5
+        self._joystick_y: float = 0.5
+        # 上一帧摇杆更新的墙钟时刻，用于计算 dt；None 表示尚未初始化。
+        self._last_cursor_ns: int | None = None
 
     def update_config(self, config: AppConfig) -> None:
         self.config = config
@@ -593,6 +599,57 @@ class GestureEngine:
 
     def _cursor(self, point: Landmark, timestamp_ns: int) -> tuple[float, float]:
         return self._smooth(*self._map(point), timestamp_ns)
+
+    def _joystick_update(self, point: Landmark, arrival_ns: int) -> tuple[float, float]:
+        """摇杆式光标：食指尖偏离画面中心 → 速度 → 位置累加。
+
+        与绝对映射（``_cursor``）的本质区别：输入是食指尖相对画面中心
+        的偏移方向与幅度，输出是速度，位置靠帧间 dt 累加推进。手臂可
+        保持稳定，只动手指/手腕即可控制光标。
+
+        - 死区内光标不动（过滤生理手抖）。
+        - 死区外偏移越大速度越快（非线性，微动精、大动快）。
+        - dt 上限 200ms，防止卡顿时光标飞出去。
+        - 首次调用时把摇杆位置初始化为当前光标位置，避免跳变。
+        """
+
+        if self._last_cursor_ns is None or (arrival_ns - self._last_cursor_ns) > 500_000_000:
+            # 首次调用或摇杆已闲置超过 500ms：重新锚定到当前光标位置，
+            # 避免从 DRAG/绝对映射/手势切换切回摇杆时光标跳变。
+            self._last_cursor_ns = arrival_ns
+            self._joystick_x, self._joystick_y = self._last_smoothed
+            return self._joystick_x, self._joystick_y
+
+        dt_s = min((arrival_ns - self._last_cursor_ns) / 1_000_000_000, 0.2)
+        self._last_cursor_ns = arrival_ns
+
+        # 食指尖偏离画面中心的偏移（画面归一化坐标，x/y 范围 [0,1]）。
+        dx = point.x - 0.5
+        dy = point.y - 0.5
+        dist = hypot(dx, dy)
+
+        deadzone = self.config.cursor_deadzone_radius
+        if dist < deadzone:
+            return self._joystick_x, self._joystick_y
+
+        # 死区外偏移映射到速度因子 [0, 1]：以 0.24 为满速参考半径
+        # （画面半宽 0.5 的一半），超出钳为 1。1.5 次方让微动更精确、
+        # 大动更快速，类似摇杆的非线性响应曲线。
+        raw_factor = min((dist - deadzone) / 0.24, 1.0)
+        speed_factor = raw_factor ** 1.5
+
+        speed = (
+            speed_factor
+            * self.config.cursor_max_speed
+            * self.config.cursor_speed_multiplier
+        )
+        move_dist = speed * dt_s
+
+        nx = dx / dist
+        ny = dy / dist
+        self._joystick_x = max(0.0, min(1.0, self._joystick_x + nx * move_dist))
+        self._joystick_y = max(0.0, min(1.0, self._joystick_y + ny * move_dist))
+        return self._joystick_x, self._joystick_y
 
     def _release_left(self, timestamp_ns: int) -> list[MouseCommand]:
         if not self._left_button_down:
@@ -1381,7 +1438,11 @@ class GestureEngine:
         self.state = ControlState.MOVING
         self._pointer_tilt_anchor = palm_tilt
         self._pointer_rotation_active = False
-        x, y = self._cursor(points[8], now)
+        if self.config.cursor_joystick_enabled:
+            # 摇杆模式：食指尖偏离画面中心驱动光标速度，手臂可保持稳定。
+            x, y = self._joystick_update(points[8], arrival_ns)
+        else:
+            x, y = self._cursor(points[8], now)
         commands.append(self._command(MouseCommandType.MOVE, now, x=x, y=y))
         return commands
 
