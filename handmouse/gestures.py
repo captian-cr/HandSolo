@@ -1230,7 +1230,12 @@ class GestureEngine:
                 if self._left_button_down:
                     commands.extend(self._release_left(now))
                 elif self._left_started_ns is not None:
-                    if self._double_armed:
+                    held_ms = (now - self._left_started_ns) / 1_000_000
+                    # 短于 pinch_hold_ms 的快速掠过视为误触，不触发点击，
+                    # 也不挂起双击窗口。实机易误触时调大此阈值。
+                    if held_ms < self.config.pinch_hold_ms:
+                        pass
+                    elif self._double_armed:
                         # 第二次捏合释放：双击成立。第一次点击从未落地，
                         # 因此不会出现"先单击一次再双击"的三连击。
                         commands.append(

@@ -62,6 +62,9 @@ class AppConfig:
     pinch_release: float = 0.55
     pinch_arm: float = 0.72
     right_pinch_approach_delta: float = 0.22
+    # 捏合持续时间门槛：短于此值的快速掠过视为误触，不触发点击/拖拽。
+    # 实机觉得太容易误触时调大（如 200ms），觉得反应迟顿时调小。
+    pinch_hold_ms: int = 100
     drag_hold_ms: int = 5000
     # 拖拽锚定式光标的位移增益：屏幕行程 = gain × 掌心屏幕位移。
     # 掌心刚体行程比食指尖短，实机觉得拖拽偏慢时只调此值，不改代码。
@@ -170,6 +173,7 @@ class AppConfig:
             min(0.60, float(self.right_pinch_approach_delta)),
         )
         self.drag_hold_ms = max(300, min(10_000, int(self.drag_hold_ms)))
+        self.pinch_hold_ms = max(0, min(1000, int(self.pinch_hold_ms)))
         self.drag_gain = max(0.1, min(5.0, float(self.drag_gain)))
         self.double_click_window_ms = max(
             100, min(1000, int(self.double_click_window_ms)),

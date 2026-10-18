@@ -1419,3 +1419,46 @@ def test_pointer_uses_joystick_when_enabled(arrival_clock) -> None:
     move_off = [c for c in commands_off if c.kind == MouseCommandType.MOVE][0]
     # 绝对映射下食指尖在画面左侧，映射到屏幕左侧。
     assert move_off.x < 0.5
+
+
+# ==================== 捏合防误触 ====================
+
+
+def test_short_pinch_below_hold_ms_does_not_click(arrival_clock) -> None:
+    """短于 pinch_hold_ms 的快速掠过不触发点击，也不挂起双击窗口。"""
+
+    engine = GestureEngine(AppConfig(pinch_hold_ms=100))
+
+    # 捏合开始。
+    assert engine.process(observation(left_pinch_points(), BASE)) == []
+
+    # 50ms 后释放（< 100ms 门槛）：不应挂起双击窗口。
+    arrival_clock.advance_ms(50)
+    commands = engine.process(observation(pointer_points(), BASE + 50_000_000))
+    assert MouseCommandType.LEFT_CLICK not in kinds(commands)
+    assert MouseCommandType.LEFT_DOUBLE_CLICK not in kinds(commands)
+    # 双击窗口未被挂起，后续帧也不会补提交单击。
+    arrival_clock.advance_ms(500)
+    commands = engine.process(observation(pointer_points(), BASE + 550_000_000))
+    assert MouseCommandType.LEFT_CLICK not in kinds(commands)
+
+
+def test_pinch_above_hold_ms_still_clicks(arrival_clock) -> None:
+    """捏合持续时间超过 pinch_hold_ms 时，正常触发点击（双击窗口机制）。"""
+
+    engine = GestureEngine(AppConfig(pinch_hold_ms=100))
+
+    assert engine.process(observation(left_pinch_points(), BASE)) == []
+
+    # 200ms 后释放（> 100ms 门槛）：挂起双击窗口。
+    arrival_clock.advance_ms(200)
+    assert engine.process(
+        observation(pointer_points(), BASE + 200_000_000),
+    ) == []
+
+    # 窗口到期后补提交单击。
+    arrival_clock.advance_ms(500)
+    commands = engine.process(
+        observation(pointer_points(), BASE + 700_000_000),
+    )
+    assert MouseCommandType.LEFT_CLICK in kinds(commands)
