@@ -1,0 +1,46 @@
+MIT License
+
+Copyright (c) 2026 HandSolo contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+第三方代码归属 / Third-party attribution
+================================================================================
+
+本项目的手部关键点管线（采集 → 推理 → 后处理）移植自 Vimoose：
+
+    Vimoose — https://github.com/KIdiens/Vimoose
+    MIT License, Copyright (c) 2026 KIdiens
+
+移植边界：`handmouse/vision.py` 的采集与推理骨架、`handmouse/partial_tracking.py`
+的局部续跟踪、`handmouse/filters.py` 的 One Euro 滤波器、`handmouse/mouse.py`
+的 SendInput 注入方式。手势状态机、捏合/双击/拖拽语义、控件磁吸、调试 HUD、
+配置系统与全部测试为本项目原创实现。
+
+上游许可全文随包分发于 `handmouse/LICENSE.vimoose`，其条款与本文件一致
+（同为 MIT），因此整体可以 MIT 分发。
+
+另外使用（通过依赖安装、未修改分发）的组件：
+
+    MediaPipe            Apache-2.0    手部关键点模型与推理运行时
+    OpenCV               Apache-2.0    图像处理与预览窗口
+    NumPy                BSD-3-Clause  数值运算
+    uiautomation         MIT           Windows UI Automation 封装（可选）
+    psutil               BSD-3-Clause  资源采样（可选）

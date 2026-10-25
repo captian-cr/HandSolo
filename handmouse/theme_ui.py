@@ -540,7 +540,9 @@ class ThemePanel:
         """返回命中的图标在**当前上下文**里的下标（网格页或抽屉页）。"""
 
         targets = self._panel_targets if self.panel_open else self._targets
-        margin = 22 * self.factor
+        # 外扩相当于"软磁吸"：图标本身 128px 已经够大，再往中心吸附反而会
+        # 让光标在图标内显得卡住。这里只把边界放宽，远处仍判无命中。
+        margin = 34 * self.factor
         for index, (x0, y0, x1, y1) in enumerate(targets):
             if (
                 x0 - margin <= x <= x1 + margin
@@ -607,6 +609,7 @@ class ThemePanel:
             self._hud_id,
             text=(
                 f"{pose_label}　FPS {self.state.fps:.0f}　捏合比 {ratio_text}　{where}\n"
+                f"{self.state.finger_hint}\n"
                 f"{self.state.message}"
             ),
         )

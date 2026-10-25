@@ -26,7 +26,17 @@ from math import hypot
 from pathlib import Path
 from types import SimpleNamespace
 
-from handmouse import __version__, debug_view, guided
+from handmouse import (
+    APP_NAME,
+    APP_TAGLINE,
+    __version__,
+    debug_view,
+    guided,
+    intro,
+    snap_ui,
+    state_indicator,
+    window_ball,
+)
 from handmouse.config import PROJECT_ROOT, AppConfig, ConfigStore
 from handmouse.hotkeys import HotkeyMonitor
 from handmouse.mouse import MouseController, NullMouseBackend, Win32MouseBackend
@@ -35,11 +45,36 @@ from handmouse.screen_map import ScreenMap, dpi_state, system_dpi_scale
 
 LOGGER = logging.getLogger(__name__)
 
+#: 「手出画」时圆环还留多久（秒）。留太久会挡住他正在看的东西，
+#: 太短又来不及看到——1.2 秒足够注意到，又不会赖在屏幕上。
+_LOST_RING_GRACE_S = 1.2
+
+#: 这几种状态下**没有可跟随的东西**（"手出画"光标不动、"已暂停"根本不控制），
+#: 圆环只亮一下把原因交代清楚，然后收走。否则开机自启时屏幕正中会永久
+#: 挂一个灰圈，看着像程序卡住了。
+_TRANSIENT_GESTURES = frozenset({"lost", "paused"})
+
+
+def _ring_visibility(
+    gesture: str, since: float | None, now: float,
+) -> tuple[bool, float | None]:
+    """这一帧圆环要不要显示，以及更新后的"暂态起点"。
+
+    ``since`` 是该暂态第一次出现的时刻（``None`` = 刚开始）。
+    返回值第二项要写回调用方，否则宽限期永远从 0 起算。
+    """
+
+    if gesture not in _TRANSIENT_GESTURES:
+        return True, None
+    if since is None:
+        return True, now
+    return (now - since) <= _LOST_RING_GRACE_S, since
+
 
 def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="handmouse",
-        description="HandMouse 视觉手势鼠标（引擎层移植自 Vimoose，MIT）",
+        description=f"{APP_NAME} {__version__} —— {APP_TAGLINE}（引擎层移植自 Vimoose，MIT）",
     )
     parser.add_argument("--config", metavar="PATH", help="配置文件路径，默认仓库根目录 config.json")
     parser.add_argument("--camera", type=int, help="摄像头序号，覆盖 config")
@@ -54,6 +89,23 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         help="启动即接管鼠标（默认先暂停，按 M 或 Ctrl+Alt+G 才接管）",
     )
     parser.add_argument("--no-snap", action="store_true", help="关闭控件磁吸（需要 handmouse[uia]）")
+    parser.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="不显示预览窗（轻量后台运行）：省掉每帧的 HUD 绘制与 imshow，"
+        "状态全靠光标旁的小圆环；全局热键 Ctrl+Alt+G/Esc/Q 照常可用",
+    )
+    parser.add_argument(
+        "--onboarding",
+        action="store_true",
+        help="首次设置向导：先在画面上标点采集你的舒适位置与习惯速率，"
+        "再把每种手势带你过一遍并录成你自己的样本库",
+    )
+    parser.add_argument(
+        "--replay-intro",
+        action="store_true",
+        help="重放开屏动效（默认只在首次进入控制态时播一次）",
+    )
     parser.add_argument(
         "--multi-monitor",
         action="store_true",
@@ -97,6 +149,17 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "需同时设置环境变量 HANDMOUSE_VERBOSE_GATE=1 才能启用诊断日志。",
     )
     parser.add_argument(
+        "--infer-width", type=int, default=None, metavar="PX",
+        help="推理输入限宽（像素），0=原尺寸。实测 640→320 只提升 13%%："
+             "MediaPipe 内部会把输入缩放到固定尺寸，所以外面缩几乎无效。"
+             "保留此开关仅用于实验，不建议开。",
+    )
+    parser.add_argument(
+        "--fast-inference", action="store_true",
+        help="等价于 --infer-width 320。实测提速有限（7.5→8.5fps），"
+             "因为瓶颈在模型本身而非输入分辨率。",
+    )
+    parser.add_argument(
         "--sign-ref",
         action="store_true",
         help="掌/背朝向符号参照：4 姿势（右手掌/右手背/左手掌/左手背）× 5s"
@@ -119,6 +182,10 @@ def _apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> AppConf
         config.virtual_desk_experimental = True
     if args.no_snap:
         config.cursor_snap_enabled = False
+    if args.infer_width is not None:
+        config.inference_width = max(0, args.infer_width)
+    elif args.fast_inference:
+        config.inference_width = 320
     config.validate()
     return config
 
@@ -154,7 +221,9 @@ def main(argv: list[str] | None = None) -> int:
     # 输出被重定向到日志文件时，stdout 会被 Python 改成块缓冲：
     # 环境指纹和 10s 采样心跳会卡在缓冲区里直到进程退出，"当场可读"就没有了。
     # logging 走 stderr（无缓冲）所以 `[状态]` 行一直正常，这里补齐 stdout。
-    sys.stdout.reconfigure(line_buffering=True)
+    # ⚠️ pythonw.exe 启动时 sys.stdout 是 None，直接调 reconfigure 会 AttributeError。
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(line_buffering=True)
 
     args = _arguments(argv)
     logging.basicConfig(
@@ -188,6 +257,25 @@ def main(argv: list[str] | None = None) -> int:
 
     store = ConfigStore(args.config)
     config = _apply_cli_overrides(store.load(), args)
+
+    # ---- 首次设置向导（不接管鼠标，单独一条路径）----
+    if getattr(args, "onboarding", False):
+        from handmouse.onboarding import run_onboarding
+
+        return run_onboarding(config)
+
+    # 还没录过自己的习惯：每次都提醒（按用户要求"下载好就要提醒"），
+    # 但不阻断——录一次要两分钟，强制会把人直接赶走。
+    if not config.onboarding_done:
+        print()
+        print("!" * 62)
+        print("  还 没 录 过 你 自 己 的 手 势 习 惯")
+        print("  现在用的阈值是作者按他自己的手标定的，换一个人会明显不跟手。")
+        print("  花两分钟录一遍你自己的：")
+        print("      python -m handmouse --onboarding")
+        print("  （或者：双击 「HandSolo（首次设置）.bat」）")
+        print("!" * 62)
+        print()
 
     # gate-diag 启动头：把本轮的关键判定前提（镜像约定 + 朝向幅度门槛）钉进
     # 诊断日志文件头。① 修复后 expected_sign 由 mirror×handedness 派生，逐帧
@@ -264,20 +352,46 @@ def main(argv: list[str] | None = None) -> int:
         toggle=False,
         emergency=False,
         started=False,
+        #: 预览窗当前是否在显示（运行中可切，见 Ctrl+Alt+P / 窗口内 P）
+        preview_on=not getattr(args, "no_preview", False),
+        preview_toggle=False,
     )
     hotkeys = HotkeyMonitor(
         lambda: setattr(state, "toggle", True),
         lambda: setattr(state, "emergency", True),
         lambda: setattr(state, "quit", True),
+        lambda: setattr(state, "preview_toggle", True),
     )
     hotkeys.start()
 
-    print(f"HandMouse {__version__}  后端={type(backend).__name__}  {screen_map.describe()}")
+    print(f"{APP_NAME} {__version__}  后端={type(backend).__name__}  {screen_map.describe()}")
     print(f"配置={store.path}  安全模式={'开' if safe_mode else '关'}")
     if not safe_mode:
         store.save(config)
     print(_environment_line(config, safe_mode))
     print("按键：M 暂停/恢复(接管) | ESC/Q 退出 | Ctrl+Alt+G 接管 | Ctrl+Alt+Esc 急停 | Ctrl+Alt+Q 退出")
+
+    # 窗口底部悬浮球：**必须在 pipeline.start() 之前建好并注入**。
+    # 控制线程在 start() 里构造时就取走了 `pipeline.ball` 这个引用，
+    # 之后再赋值它看不到（2026-10-22 踩过：球画出来了但拉不动）。
+    # 绘制层建不出来（无显示 / 透明穿透失败）就整个跳过，控制器也不装，
+    # 免得出现"看不见球却能拉"的鬼现象。
+    ball: window_ball.WindowBallController | None = None
+    ball_overlay: window_ball.WindowBallOverlay | None = None
+    if getattr(config, "window_ball_enabled", True):
+        try:
+            ball = window_ball.WindowBallController(enabled=True)
+            ball_overlay = window_ball.WindowBallOverlay(ball)
+            if not ball_overlay.show():
+                ball_overlay = None
+                ball = None
+            else:
+                pipeline.ball = ball
+                print("[悬浮球] 已启用：应用底部白色圆球（左右拉扩边、上下拉缩放、松手回弹）")
+        except Exception as exc:
+            print(f"[悬浮球] 未能创建悬浮球层（{exc}），已跳过。")
+            ball = None
+            ball_overlay = None
 
     if not pipeline.start():
         print("流水线启动失败，详见上方日志。")
@@ -285,7 +399,39 @@ def main(argv: list[str] | None = None) -> int:
         mouse.shutdown()
         return 3
 
+    # 吸附光环：全屏透明层，命中目标时浮一圈动态彩色环。
+    # 建不出来（无显示环境 / 透明穿透设置失败）就安静放弃，绝不挡住桌面点击。
+    halo: snap_ui.SnapHaloOverlay | None = None
+    if getattr(config, "snap_halo_enabled", True):
+        try:
+            halo = snap_ui.SnapHaloOverlay()
+            if not halo.show():
+                halo = None
+        except Exception as exc:
+            print(f"[光环] 未能创建吸附提示层（{exc}），已跳过。")
+            halo = None
+
+    # 状态颜色指示器：没有预览窗时唯一的状态反馈。建不出来就安静跳过。
+    indicator: state_indicator.StateIndicator | None = None
+    if getattr(config, "state_indicator_enabled", True):
+        try:
+            indicator = state_indicator.StateIndicator()
+            if not indicator.show():
+                indicator = None
+        except Exception as exc:
+            print(f"[指示器] 未能创建状态圆环（{exc}），已跳过。")
+            indicator = None
+    last_indicator_at = 0.0
+    #: 「手出画 / 已暂停」这种暂态是从什么时候开始的（用来先亮圆环、再收走）。
+    ring_since: float | None = None
+    last_ball_prune_at = 0.0
+
     state.started = True
+    # 开屏动效：只在首次进入控制态时播一次；--replay-intro 可强制重放。
+    intro_player: intro.IntroPlayer | None = None
+    intro_pending = bool(getattr(args, "replay_intro", False)) or intro.should_play()
+    if getattr(args, "replay_intro", False):
+        intro.mark_played()
     # 引导模式必须处于接管态，否则引擎只报 paused，看不到 pointer/lost 迁移。
     engine_started_paused = not args.auto_control and not args.guided
     if engine_started_paused:
@@ -316,6 +462,14 @@ def main(argv: list[str] | None = None) -> int:
         gate_diag = guided.GateDiagController(diag_steps)
 
     scale = system_dpi_scale()
+    # 预览窗：轻量部署（开机自启 / 桌面双击）不需要它——每帧 build_view + imshow
+    # 是整个主循环里最贵的一段，而且窗口会自己弹到最前抢焦点。
+    preview_on = not getattr(args, "no_preview", False)
+    if not preview_on:
+        print(
+            "预览窗=关（轻量后台模式）。状态看光标旁的小圆环；"
+            "需要看画面时改用「启动%s.bat」。" % APP_NAME,
+        )
     # gate-diag 的 deadline 在预检通过那一刻才起算（预检不计时）。
     deadline = (
         time.monotonic() + args.diagnostic_seconds
@@ -324,9 +478,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     next_heartbeat = time.monotonic() + max(1.0, args.sample_seconds)
     exit_code = 0
+    # 渲染去重：FramePacket.sequence 是采集线程的全局帧号，采集 30fps。
+    # 主循环原本靠 cv2.waitKey(1) 自然节流到约 113 次/秒，其中约 3/4 的重绘
+    # 是把同一帧重复画一遍 + 重复 imshow。这既白烧 CPU，又持续迫使 Windows DWM
+    # 重绘窗口、把独显从 P8 拉到 P0（实测 2295MHz / 16.8W）。
+    #
+    # 这里按 sequence 变化判新帧：**无新帧时跳过 build_view/imshow，但仍然走
+    # waitKey 喂按键**，所以 M/R/ESC/Q 的响应延迟不受限速影响。
+    # 注意不能用 sleep 限速——那会把按键延迟一起拖慢。
+    last_rendered_sequence = -1
+    # 按键轮询的最小间隔。waitKey(1) 实测阻塞 13.9ms（约 72Hz），
+    # 空转时保持这个节奏就够了；有新帧时按采集节奏走。
     try:
         while not state.quit:
+            if intro_player is not None:
+                # 播开屏期间主循环让位：只推进动画，不跑摄像头与按键。
+                # 三秒多而已，热键（Ctrl+Alt+Esc）仍然有效。
+                if intro_player.tick():
+                    time.sleep(0.01)
+                    continue
+                intro_player.close()
+                intro_player = None
+                intro.mark_played()
+                continue
             _apply_pending_hotkeys(state, pipeline)
+            preview_on = state.preview_on
             if time.monotonic() >= next_heartbeat:
                 _print_heartbeat(pipeline.snapshot())
                 next_heartbeat = time.monotonic() + max(1.0, args.sample_seconds)
@@ -334,6 +510,21 @@ def main(argv: list[str] | None = None) -> int:
             if frame_packet is None:
                 time.sleep(0.01)
             else:
+                # ---- 关键路径：新帧才重绘；旧帧只喂按键 ----
+                is_new_frame = frame_packet.sequence != last_rendered_sequence
+                if not is_new_frame:
+                    if preview_on:
+                        # 画面没变，但按键必须继续读，否则窗口会"卡住"按不动。
+                        if not _handle_key(
+                            debug_view.present(debug_view.WINDOW_NAME, None, scale),
+                            state, pipeline, config,
+                        ):
+                            break
+                    else:
+                        # 没有预览窗就没有 waitKey 顺手帮我们节流，自己让一点 CPU。
+                        time.sleep(0.005)
+                    continue
+
                 snapshot = pipeline.snapshot()
                 banner = None
                 if gate_diag is not None:
@@ -362,18 +553,93 @@ def main(argv: list[str] | None = None) -> int:
                         gate_diag.hud_text(),
                         debug_view.RED if gate_diag.hud_alert else debug_view.GREEN,
                     )
-                view = debug_view.build_view(
-                    frame_packet.frame,
-                    snapshot,
-                    detection,
-                    screen_map,
-                    config,
-                    _pinch_ratio(detection),
-                    banner=banner,
+                if intro_pending and snapshot.gesture.value == "pointer":
+                    intro_pending = False
+                    player = intro.IntroPlayer()
+                    if player.start():
+                        intro_player = player
+                        continue
+                    intro.mark_played()
+                view = (
+                    debug_view.build_view(
+                        frame_packet.frame,
+                        snapshot,
+                        detection,
+                        screen_map,
+                        config,
+                        _pinch_ratio(detection),
+                        banner=banner,
+                    )
+                    if preview_on
+                    else None
                 )
-                if recorder is not None:
+                if halo is not None and not halo.closed:
+                    halo.update(snapshot.snap_rect, snapshot.snap_target_name or "")
+                    halo.refresh()
+                if ball is not None and ball_overlay is not None and not ball_overlay.closed:
+                    # 光标位置用引擎自己记的归一化坐标换算成屏幕像素：
+                    # 球心是按窗口矩形算的像素坐标，两边必须同一坐标系。
+                    cx, cy = pipeline.engine.cursor_position
+                    bx, by = screen_map.to_pixels(cx, cy)
+                    # 14fps 左右足够：球只在淡入淡出和回弹时有变化。
+                    ball.update(time.monotonic_ns(), (bx, by))
+                    # 每 2 秒清一次僵尸窗口，免得球越积越多。
+                    if time.monotonic() - last_ball_prune_at >= 2.0:
+                        last_ball_prune_at = time.monotonic()
+                        ball.prune()
+                        # 顺带把球层提到最前：吸附光环/状态圆环是**后**创建的，
+                        # 同为 topmost 时会盖在球层上面。球在窗口下方那块通常
+                        # 不重叠，但重叠一次就"球不见了"，代价太大。
+                        try:
+                            ball_overlay.root.lift()
+                        except Exception:
+                            pass
+                    ball_overlay.refresh()
+                    # HUD 诊断：看不见球时靠这行直接看出卡在哪一步
+                    # （没有前台窗口 / 透明度是 0 / 球心跑到屏幕外）。
+                    track = ball.tracks.get(ball.active_hwnd)
+                    if track is None:
+                        snapshot.ball_note = "球 hwnd=0（没取到前台窗口）"
+                    else:
+                        sx, sy = track.center
+                        on_screen = 0 <= sx <= ball_overlay.screen_w and 0 <= sy <= ball_overlay.screen_h
+                        snapshot.ball_note = (
+                            f"球 hwnd={track.hwnd} alpha={track.alpha:.2f} "
+                            f"({sx:.0f},{sy:.0f}) {'屏内' if on_screen else '屏外!'}"
+                            + (" 抓着" if ball.grabbing else "")
+                        )
+                elif ball_overlay is None:
+                    snapshot.ball_note = "球 未启用（叠加层创建失败）"
+                if indicator is not None and not indicator.closed:
+                    # 指示器只需要 ~15fps：圆环跟随光标，太快纯属浪费合成开销。
+                    now_i = time.monotonic()
+                    if now_i - last_indicator_at >= 0.066:
+                        last_indicator_at = now_i
+                        cx, cy = pipeline.engine.cursor_position
+                        px, py = screen_map.to_pixels(cx, cy)
+                        gesture_now = pipeline.engine.current_gesture.value
+                        # 「手出画 / 已暂停」没有可跟随的东西：先亮 1.2 秒把原因
+                        # 交代清楚，再收走（用户要求：光标没了圆环也跟着消失）。
+                        # 没有预览窗时，圆环突然消失和"程序崩了"长得一样，
+                        # 所以那 1.2 秒不能省。
+                        show_ring, ring_since = _ring_visibility(
+                            gesture_now, ring_since, time.monotonic(),
+                        )
+                        indicator.update(
+                            screen_x=px,
+                            screen_y=py,
+                            gesture=gesture_now,
+                            visible=show_ring,
+                        )
+                        indicator.refresh()
+                if recorder is not None and view is not None:
                     recorder.capture(view)
-                key = debug_view.present(debug_view.WINDOW_NAME, view, scale)
+                last_rendered_sequence = frame_packet.sequence
+                key = (
+                    debug_view.present(debug_view.WINDOW_NAME, view, scale)
+                    if preview_on
+                    else -1
+                )
                 if not _handle_key(key, state, pipeline, config):
                     break
 
@@ -386,12 +652,37 @@ def main(argv: list[str] | None = None) -> int:
         pipeline.stop()
         hotkeys.stop()
         mouse.shutdown()
+        if intro_player is not None:
+            intro_player.close()
+        if indicator is not None:
+            indicator.close()
+        if halo is not None:
+            halo.close()
         debug_view.close()
 
     if recorder is not None:
         print(f"[取证] 共保存 {recorder.saved} 帧到 {recorder.directory}")
     print(f"退出。DPI={dpi_state()}")
     return exit_code
+
+
+def _set_preview(state: SimpleNamespace, want: bool | None) -> bool:
+    """开关预览窗。``want=None`` 表示"切一下"。返回切换后的状态。
+
+    🔴 关窗必须走 `debug_view.close()`：它会把内部的"窗口建过没有"标志一起清掉，
+    否则下次 `imshow` 会拿一个已经销毁的窗口去画，Windows 上表现为窗口再也不出现。
+    """
+
+    target = (not state.preview_on) if want is None else bool(want)
+    if target == state.preview_on:
+        return state.preview_on
+    state.preview_on = target
+    if target:
+        print("[预览] 已打开（Ctrl+Alt+P 或窗口内按 P 可再关掉）")
+    else:
+        debug_view.close(debug_view.WINDOW_NAME)
+        print("[预览] 已关闭，状态改看光标旁的小圆环；Ctrl+Alt+P 可再打开")
+    return target
 
 
 def _apply_pending_hotkeys(state: SimpleNamespace, pipeline: GesturePipeline) -> None:
@@ -403,6 +694,9 @@ def _apply_pending_hotkeys(state: SimpleNamespace, pipeline: GesturePipeline) ->
         state.toggle = False
         pipeline.toggle_paused()
         print(f"[控制] {'已接管' if not pipeline.engine.paused else '已暂停'}")
+    if state.preview_toggle:
+        state.preview_toggle = False
+        _set_preview(state, None)
 
 
 def _handle_key(
@@ -420,10 +714,104 @@ def _handle_key(
     if key in (ord("m"), ord("M")):
         pipeline.toggle_paused()
         print(f"[控制] {'已接管' if not pipeline.engine.paused else '已暂停'}")
+    elif key in (ord("p"), ord("P")):
+        _set_preview(state, None)
     elif key in (ord("r"), ord("R")):
         pipeline.engine.filter.reset()
         print("[状态] 已重置滤波器")
+    elif key in (ord("+"), ord("=")):
+        config.cursor_speed_multiplier = min(
+            10.0, round(config.cursor_speed_multiplier + 0.2, 2),
+        )
+        print(f"[摇杆] 速度倍率 → {config.cursor_speed_multiplier}x")
+    elif key in (ord("]"), ord("}")):
+        _nudge_margins(config, +0.02, pipeline)
+        _print_feel(config, "更灵敏")
+    elif key in (ord("["), ord("{")):
+        _nudge_margins(config, -0.02, pipeline)
+        _print_feel(config, "更精细")
+    elif key == ord("."):
+        # 更跟手：降低静止平滑（min_cutoff 升高），代价是抖。
+        config.pointer_stability = max(
+            0.0, round(config.pointer_stability - 0.04, 2),
+        )
+        pipeline.engine.update_config(config)
+        _print_feel(config, "静止更跟手")
+    elif key == ord(","):
+        # 更稳：提高静止平滑，代价是略钝。
+        config.pointer_stability = min(
+            1.0, round(config.pointer_stability + 0.04, 2),
+        )
+        pipeline.engine.update_config(config)
+        _print_feel(config, "静止更稳")
+    elif key == ord(">"):
+        # 大动作更跟手：beta 升高 —— 快速移动时滤波器 cutoff 抬得更高，
+        # 光标更贴手，但也更容易冲过头。
+        config.pointer_response = min(
+            1.0, round(config.pointer_response + 0.04, 2),
+        )
+        pipeline.engine.update_config(config)
+        _print_feel(config, "大动作更跟手")
+    elif key == ord("<"):
+        # 大动作更稳：beta 降低 —— 手大幅快速移动时滤波仍然很强，
+        # 光标不会跟着甩出去，代价是快速掠过时略微拖尾。
+        # 这就是"大幅转动时降低灵敏度、保持稳定"的那个旋钮。
+        config.pointer_response = max(
+            0.0, round(config.pointer_response - 0.04, 2),
+        )
+        pipeline.engine.update_config(config)
+        _print_feel(config, "大动作更稳")
+    elif key in (ord("-"), ord("_")):
+        config.cursor_speed_multiplier = max(
+            0.2, round(config.cursor_speed_multiplier - 0.2, 2),
+        )
+        print(f"[摇杆] 速度倍率 → {config.cursor_speed_multiplier}x")
     return True
+
+
+def _nudge_margins(config: AppConfig, delta: float, pipeline: GesturePipeline) -> None:
+    """四边内缩同步增减（保持非对称形状，只改整体灵敏度）。
+
+    走 `effective_margins()`：如果配置里用的是四边独立值，就直接改那四个；
+    否则把对称值展开成四个再改，之后统一按非对称处理。
+    """
+
+    left, top, right, bottom = config.effective_margins()
+    left = max(0.0, min(0.35, left + delta))
+    top = max(0.0, min(0.35, top + delta))
+    right = max(0.0, min(0.35, right + delta))
+    bottom = max(0.0, min(0.35, bottom + delta))
+    # 任一轴加起来不能吃掉整个画面。
+    if top + bottom > 0.9:
+        bottom = max(0.0, 0.9 - top)
+    if left + right > 0.9:
+        right = max(0.0, 0.9 - left)
+    config.pointer_margin_left = left
+    config.pointer_margin_top = top
+    config.pointer_margin_right = right
+    config.pointer_margin_bottom = bottom
+    config.validate()
+    pipeline.engine.update_config(config)
+
+
+def _print_feel(config: AppConfig, label: str) -> None:
+    """手感调整后的回执：把两个旋钮的当前值换算成能感知的量。"""
+
+    left, top, right, bottom = config.effective_margins()
+    travel_x = max(0.01, 1.0 - left - right)
+    travel_y = max(0.01, 1.0 - top - bottom)
+    # 两个平滑旋钮的物理含义（One Euro）：
+    #   stability 越高 → min_cutoff 越低 → 手停住时越不抖
+    #   response  越高 → beta 越高   → 快速移动时越贴手（也越容易冲过头）
+    min_cutoff = 3.0 - 2.2 * config.pointer_stability
+    beta = 0.35 + 1.55 * config.pointer_response
+    print(
+        f"[手感] {label} → 内缩 上{top:.2f} 下{bottom:.2f} "
+        f"左{left:.2f} 右{right:.2f}"
+        f"（手行程 {travel_x:.0%}×{travel_y:.0%}）  "
+        f"静止 stability={config.pointer_stability:.2f}(cutoff {min_cutoff:.2f})  "
+        f"大动作 response={config.pointer_response:.2f}(beta {beta:.2f})",
+    )
 
 
 def _environment_line(config: AppConfig, safe_mode: bool) -> str:
@@ -536,7 +924,7 @@ def _metrics_text(snapshot) -> str:
     return (
         "capture_fps=%.1f inference_fps=%.1f latency_ms=%.1f latency_p50_ms=%.1f "
         "latency_p95_ms=%.1f hand_rate_3s=%.1f hand_rate_run=%.1f dropped_frames=%d "
-        "cpu_percent=%.1f memory_mb=%.1f error=%s"
+        "cpu_percent=%.1f memory_mb=%.1f thumb=%.2f error=%s"
         % (
             metrics.capture_fps,
             metrics.inference_fps,
@@ -548,6 +936,7 @@ def _metrics_text(snapshot) -> str:
             metrics.dropped_frames,
             metrics.cpu_percent,
             metrics.memory_mb,
+            metrics.thumb_spread_percent / 100.0,
             snapshot.camera_error or "none",
         )
     )

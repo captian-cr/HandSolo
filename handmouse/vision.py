@@ -124,24 +124,48 @@ class RecognitionTransform:
 def prepare_recognition_frame(
     frame: np.ndarray,
     zoom: float,
+    max_width: int = 0,
 ) -> tuple[np.ndarray, RecognitionTransform]:
-    """温和放大中央识别区，并返回可逆坐标变换。
+    """温和放大中央识别区，可选再把推理分辨率压下来，并返回可逆坐标变换。
 
     这不是跟踪ROI：裁剪区固定居中、不会追随手部移动。默认1.15倍只裁掉
     四周约6.5%，能提高远手和小手在模型输入中的有效像素，同时保留大部分
     画面。设置为1.0时零拷贝返回原帧。
+
+    ``max_width`` 用于给 MediaPipe 的输入限宽（0 表示不限制）。实测在 CPU 上
+    640×480 只能跑 7.4fps，降到 320×240 可翻倍以上。**归一化坐标与输出分辨率
+    无关**，只要保持宽高比，``RecognitionTransform.restore()`` 仍然正确。
     """
 
     zoom = max(1.0, min(1.35, float(zoom)))
-    if zoom <= 1.001:
-        return frame, RecognitionTransform()
     height, width = frame.shape[:2]
-    crop_width = max(2, round(width / zoom))
-    crop_height = max(2, round(height / zoom))
-    left = max(0, (width - crop_width) // 2)
-    top = max(0, (height - crop_height) // 2)
-    crop = frame[top : top + crop_height, left : left + crop_width]
-    resized = cv2.resize(crop, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    if zoom <= 1.001:
+        left = top = 0
+        crop_width, crop_height = width, height
+        crop = frame
+    else:
+        crop_width = max(2, round(width / zoom))
+        crop_height = max(2, round(height / zoom))
+        left = max(0, (width - crop_width) // 2)
+        top = max(0, (height - crop_height) // 2)
+        crop = frame[top : top + crop_height, left : left + crop_width]
+
+    # 默认放大回原尺寸（这是 zoom 的原语义）；只有显式限制宽度时才缩小。
+    out_width, out_height = width, height
+    limit = int(max_width or 0)
+    if limit and crop_width > limit:
+        ratio = limit / crop_width
+        out_width = limit
+        out_height = max(2, round(crop_height * ratio))
+
+    if out_width == crop_width and out_height == crop_height:
+        resized = crop
+    else:
+        resized = cv2.resize(
+            crop, (out_width, out_height), interpolation=cv2.INTER_LINEAR,
+        )
+
     return (
         resized,
         RecognitionTransform(
@@ -193,6 +217,20 @@ class CameraWorker(threading.Thread):
     # 连续读失败达到这么多次就判定掉线，释放句柄后按退避重连。
     RECONNECT_AFTER_FAILURES = 10
 
+    #: 配置的分辨率拿不到时依次尝试的档位（通常只在驱动回报垃圾尺寸时才用得上）。
+    #: 🔴 顺序是 **4:3 优先**：本项目的几何阈值全部在 4:3 下标定，4:3 能拿到就
+    #: 不要退到 16:9——虽然手势引擎有宽高比补偿，但少一次补偿就少一处变量。
+    #: 从大到小排，够清晰又不至于把 CPU 吃满。
+    _FALLBACK_RESOLUTIONS: tuple[tuple[int, int], ...] = (
+        (640, 480),
+        (1280, 720),
+        (960, 540),
+        (800, 600),
+        (640, 360),
+        (320, 240),
+        (160, 120),
+    )
+
     def __init__(
         self,
         config: AppConfig,
@@ -214,11 +252,35 @@ class CameraWorker(threading.Thread):
         self.on_warning = on_warning or (lambda message: LOGGER.warning(message))
         # 诊断事件回调（如 suspicious_empty），供 HUD debug 层读取。
         self.on_diag = on_diag or (lambda _kind: None)
+        #: 摄像头**实际**输出的尺寸与帧率（协商后读回，见 `_negotiate_format`）。
+        #: 配置值只是"请求"，驱动可以拒绝或静默降级，所以真实值必须记下来。
+        self.actual_size: tuple[int, int] = (
+            int(config.camera_width),
+            int(config.camera_height),
+        )
+        self.actual_fps: float = float(config.camera_fps)
+
+    def _resolve_backend(self) -> int:
+        """把配置里的后端名换成 OpenCV 的常量。
+
+        🔴 不做自动探测：同一条命令两次启动必须走同一条路径，否则"这次好使
+        下次不好使"根本没法复现。后端选错时的表现是**帧率不对**（不是报错），
+        所以由用户显式指定，并在日志里把实际用的后端打出来。
+        """
+
+        if os.name != "nt":
+            return cv2.CAP_ANY
+        name = str(getattr(self.config, "camera_backend", "dshow") or "").strip().lower()
+        return {
+            "msmf": cv2.CAP_MSMF,
+            "any": cv2.CAP_ANY,
+        }.get(name, cv2.CAP_DSHOW)
 
     def _open_camera(self) -> cv2.VideoCapture:
-        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+        backend = self._resolve_backend()
         capture = cv2.VideoCapture(self.config.camera_index, backend)
         if not capture.isOpened() and backend != cv2.CAP_ANY:
+            # 配置的后端打不开时退回 OpenCV 默认后端：能开总比开不了强。
             capture.release()
             capture = cv2.VideoCapture(self.config.camera_index)
         if os.name == "nt":
@@ -226,11 +288,84 @@ class CameraWorker(threading.Thread):
                 cv2.CAP_PROP_FOURCC,
                 cv2.VideoWriter_fourcc(*"MJPG"),
             )
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.camera_width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camera_height)
-        capture.set(cv2.CAP_PROP_FPS, self.config.camera_fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._negotiate_format(capture)
         return capture
+
+    @staticmethod
+    def _sane_size(width: float, height: float) -> bool:
+        """驱动回报的尺寸能不能用。
+
+        有些驱动对不支持的档位返回 0×0 或 1×1（而不是拒绝 set），
+        那种值必须当成"没拿到"，否则画面会被裁成一条线。
+        """
+
+        return width >= 160 and height >= 120
+
+    def _resolution_candidates(self) -> list[tuple[int, int]]:
+        wanted = (int(self.config.camera_width), int(self.config.camera_height))
+        if not bool(getattr(self.config, "camera_allow_fallback", True)):
+            return [wanted]
+        candidates = [wanted]
+        for size in self._FALLBACK_RESOLUTIONS:
+            if size not in candidates:
+                candidates.append(size)
+        return candidates
+
+    def _negotiate_format(self, capture: cv2.VideoCapture) -> None:
+        """设置分辨率/帧率，并**读回实际值**——摄像头要是不支持，如实说出来。
+
+        🔴 为什么必须读回（2026-10-23 实测）：这只内置摄像头请求 1080p 会被
+        **静默降级**回 720p，`set()` 照样返回 True。不读回就永远以为自己在
+        640×480 上跑，而实际画面是 16:9 —— 所有"距离 ÷ 掌宽"的比值阈值会
+        整体漂 19%~32%（见 `_aspect_scale`）。
+
+        策略：
+        1. 先按配置值设置，读回能用就**直接用**（哪怕摄像头给的是别的档位——
+           手势引擎有宽高比补偿，任何尺寸都能跑）；
+        2. 只有读回是 0×0 这种垃圾值时，才按候选表逐个重试；
+        3. 所有情况都记日志，与配置不一致时给用户一句可执行的提示。
+        """
+
+        requested = (int(self.config.camera_width), int(self.config.camera_height))
+        best: tuple[int, int] | None = None
+        for width, height in self._resolution_candidates():
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            got_w = float(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            got_h = float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if self._sane_size(got_w, got_h):
+                best = (int(round(got_w)), int(round(got_h)))
+                break
+        if best is None:
+            best = requested
+
+        self.actual_size = best
+        capture.set(cv2.CAP_PROP_FPS, self.config.camera_fps)
+        actual_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        self.actual_fps = actual_fps if actual_fps > 0.0 else 0.0
+
+        aspect = best[0] / best[1] if best[1] else 0.0
+        LOGGER.info(
+            "摄像头 %s 实际输出 %d×%d @ %.1ffps（配置 %d×%d@%dfps，宽高比 %.3f，后端 %s）",
+            self.config.camera_index,
+            best[0], best[1], self.actual_fps,
+            requested[0], requested[1], self.config.camera_fps,
+            aspect,
+            getattr(self.config, "camera_backend", "dshow"),
+        )
+        if best != requested:
+            self.on_warning(
+                f"摄像头不支持 {requested[0]}×{requested[1]}，已自动改用 "
+                f"{best[0]}×{best[1]}。"
+                f"识别与手势判据会自动适配（宽高比 {aspect:.2f}），无需手动改配置。",
+            )
+        if self.actual_fps and self.actual_fps < self.config.camera_fps * 0.6:
+            self.on_warning(
+                f"摄像头实际帧率 {self.actual_fps:.0f}fps 明显低于配置的 "
+                f"{self.config.camera_fps}fps，跟随手感会发涩。"
+                f"可在 config.json 里把 camera_fps 调成实际值，或换 USB3 接口/更好的摄像头。",
+            )
 
     @staticmethod
     def _brightness(frame: np.ndarray) -> float:
@@ -567,6 +702,11 @@ class HandLandmarkerWorker(threading.Thread):
         timestamp_ns = timestamp_ms * 1_000_000
         observations: list[HandObservation] = []
         output_frame = np.ascontiguousarray(_output_image.numpy_view())
+        # 画面宽高比：手势引擎用它把"距离 ÷ 掌宽"这类比值还原到 4:3 标定尺度。
+        # 必须取**识别输入图**的尺寸（zoom 裁剪与 inference_width 限宽都保持
+        # 宽高比，所以它等于摄像头画面的宽高比）。
+        frame_h, frame_w = output_frame.shape[:2]
+        frame_aspect = (float(frame_w) / float(frame_h)) if frame_h and frame_w else 4.0 / 3.0
 
         # 脸检测：如果有手检测结果才跑，带 500ms 缓存（脸不会跑得那么快）。
         # 坐标系与 HandLandmarker 一致（zoom 后的归一化坐标）。
@@ -618,6 +758,20 @@ class HandLandmarkerWorker(threading.Thread):
                 )
                 for point in hand_points
             )
+            # 米制 3D 坐标（原点在手部几何中心）。**不做 restore**：它不在
+            # 归一化图像坐标系里，裁剪/缩放变换对它没有意义。
+            # 这是「手指本体」的真实三维骨架，指节夹角和长度比都不受画面
+            # 宽高比与透视压缩影响，是判断"手指伸没伸直"唯一正确的输入。
+            world_points: tuple[Landmark, ...] = ()
+            # ``getattr`` 不是防御性代码洁癖：旧版 mediapipe 的 Result 类没有
+            # 这个字段，测试里的假 Result 也没有。缺了就退化成空元组，
+            # 由 2D 判据兜底，不要因此让整条流水线炸掉。
+            world_all = getattr(result, "hand_world_landmarks", None) or ()
+            if index < len(world_all) and world_all[index]:
+                world_points = tuple(
+                    Landmark(float(point.x), float(point.y), float(point.z))
+                    for point in world_all[index]
+                )
             # 通过脸过滤后才更新 handedness 和 seed 续跟踪器，避免假阳性污染状态。
             if len(observations) == 0:
                 self._last_handedness = handedness
@@ -652,6 +806,8 @@ class HandLandmarkerWorker(threading.Thread):
                     timestamp_ns=timestamp_ns,
                     inference_ms=inference_ms,
                     handedness_score=handedness_score,
+                    world_landmarks=world_points,
+                    image_aspect=frame_aspect,
                 ),
             )
 
@@ -674,6 +830,7 @@ class HandLandmarkerWorker(threading.Thread):
                         handedness_score=self._last_handedness_score,
                         partial_finger=selected.name,
                         partial_position=restored,
+                        image_aspect=frame_aspect,
                     ),
                 )
         elif not self.config.partial_finger_tracking:
@@ -770,6 +927,7 @@ class HandLandmarkerWorker(threading.Thread):
                     recognition_frame, transform = prepare_recognition_frame(
                         packet.frame,
                         self.config.recognition_zoom,
+                        self.config.inference_width,
                     )
                     rgb = cv2.cvtColor(recognition_frame, cv2.COLOR_BGR2RGB)
                     rgb = np.ascontiguousarray(rgb)

@@ -116,6 +116,34 @@ def test_move_normalizes_to_full_range_and_zeroes_unused_fields() -> None:
         backend.shutdown()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="磁吸服务仅在 Windows 上构造")
+def test_snap_engaged_gate_follows_windowed_flag() -> None:
+    """窗口化开关决定"探测线程是否常开"，两条路径都不能写反。
+
+    * 窗口化开（新行为）：未临近点击 → 磁吸服务必须静默（省掉后台 UIA 扫描）。
+    * 窗口化关（旧行为）：磁吸常开 → 即便 engine 说"没进入窗口"，探测仍要工作。
+    """
+
+    config = AppConfig(cursor_snap_enabled=True, cursor_snap_windowed=True)
+    backend = Win32MouseBackend(config, ScreenMap(dpi_aware=False))
+    try:
+        backend.set_snap_engaged(False)
+        assert backend._snapper._engaged is False
+        backend.set_snap_engaged(True)
+        assert backend._snapper._engaged is True
+    finally:
+        backend.shutdown()
+
+    legacy = AppConfig(cursor_snap_enabled=True, cursor_snap_windowed=False)
+    backend = Win32MouseBackend(legacy, ScreenMap(dpi_aware=False))
+    try:
+        # 旧行为：磁吸一直有效，探测线程不能被"未进入窗口"关掉。
+        backend.set_snap_engaged(False)
+        assert backend._snapper._engaged is True
+    finally:
+        backend.shutdown()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="SendInput 仅在 Windows 上可用")
 def test_move_clamps_out_of_range_coordinates() -> None:
     backend = _win32_backend()

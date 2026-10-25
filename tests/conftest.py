@@ -21,6 +21,21 @@ def pointer_points() -> tuple[Landmark, ...]:
     return tuple(Landmark(x, y) for x, y in values)
 
 
+def swipe_points() -> tuple[Landmark, ...]:
+    """双指滑动姿势：食指+中指都竖直伸开，无名指与小指收拢。
+
+    在 ``pointer_points`` 基础上把中指伸直（MCP→PIP→DIP→TIP 竖直向上），
+    与"只伸食指"的唯一区别就是中指这一根——正好用来测模型/几何判据能否
+    把这两类分开。
+    """
+
+    points = list(pointer_points())
+    points[10] = Landmark(0.50, 0.45)
+    points[11] = Landmark(0.50, 0.33)
+    points[12] = Landmark(0.50, 0.20)
+    return tuple(points)
+
+
 def left_pinch_points() -> tuple[Landmark, ...]:
     points = list(pointer_points())
     points[4] = points[8]
@@ -35,8 +50,41 @@ def fist_like_left_pinch_points() -> tuple[Landmark, ...]:
     return tuple(points)
 
 
+def frontal_two_finger_points() -> tuple[Landmark, ...]:
+    """正对镜头（掌面平行于成像面）的双指姿势——用户复报的失灵场景。
+
+    与 ``swipe_points``（侧手投影）的关键区别是**掌宽没有再被压扁**：
+    本夹具 掌宽(5→17) ÷ 手长(0→9) = 1.043，接近正手的真实比例 ≈1.0；
+    而侧手夹具只有 0.55 左右。
+
+    这正是旧判据 ``|MCP→tip| ÷ 掌宽 >= 1.3`` 的致命处：它的分母里含着一个
+    会被透视压缩的掌宽，侧手时掌宽只剩一半、比值虚高到 1.3 以上；正手时
+    掌宽是满宽，同一根伸直的手指算出来只有
+
+    * 食指 1.150、中指 1.227 —— 双双卡在 1.3 以下
+
+    于是"手指明明伸直了，双指却永远不触发"。用户说的"手移到某个高度以下
+    就失灵"，本质是手腕角度变了、掌宽投影变宽，而不是位置本身。
+    """
+
+    values = [
+        (0.50, 0.85),  # 0 wrist
+        (0.44, 0.80), (0.38, 0.74), (0.33, 0.70), (0.30, 0.66),   # thumb
+        (0.40, 0.62), (0.40, 0.50), (0.40, 0.40), (0.40, 0.32),   # index
+        (0.50, 0.60), (0.50, 0.47), (0.50, 0.36), (0.50, 0.28),   # middle
+        (0.56, 0.61), (0.57, 0.53), (0.565, 0.60), (0.56, 0.64),  # ring（收拢）
+        (0.66, 0.64), (0.67, 0.56), (0.665, 0.62), (0.66, 0.66),  # pinky（收拢）
+    ]
+    return tuple(Landmark(x, y) for x, y in values)
+
+
 def right_pinch_points() -> tuple[Landmark, ...]:
     points = list(pointer_points())
+    # 中指主动伸直（MCP→PIP→DIP→tip 一条直线向上），再让拇指贴上去。
+    # 只伸食指时中指是弯的，那种情况不应触发右键捏合。
+    points[10] = Landmark(0.50, 0.45)
+    points[11] = Landmark(0.50, 0.33)
+    points[12] = Landmark(0.50, 0.20)
     points[4] = points[12]
     return tuple(points)
 
@@ -69,6 +117,23 @@ def ambiguous_right_pinch_points() -> tuple[Landmark, ...]:
     points[8] = Landmark(points[4].x + 0.01, points[4].y)
     # 保留一根自然伸展的无关手指，避免合成数据退化成真正的握拳。
     points[16] = Landmark(0.58, 0.27)
+    return tuple(points)
+
+
+def thumb_open_pointer_points() -> tuple[Landmark, ...]:
+    """停住姿势：只伸食指、其余三指握拳，但**拇指主动张开**远离食指。
+
+    与 ``pointer_points`` 的食指状态完全一致，唯一区别是拇指尖(4)与食指掌指
+    关节(5)的距离——即 ``_thumb_spread_value``：
+
+    * ``pointer_points``             → 约 0.86（默认合成手本来就偏外展）
+    * 本夹具                         → 约 1.09（对应用户实测「停住」1.1~1.4）
+
+    注意它**不是**五指张开：中指/无名指/小指仍然弯曲，因此不得进入滚轮模式。
+    """
+
+    points = list(pointer_points())
+    points[4] = Landmark(0.20, 0.45)
     return tuple(points)
 
 
@@ -185,6 +250,8 @@ def translate_points(
 def observation(
     points: tuple[Landmark, ...],
     timestamp_ns: int,
+    world: tuple[Landmark, ...] = (),
+    aspect: float = 4.0 / 3.0,
 ) -> HandObservation:
     return HandObservation(
         landmarks=points,
@@ -192,7 +259,67 @@ def observation(
         timestamp_ns=timestamp_ns,
         inference_ms=12.0,
         handedness_score=0.98,
+        world_landmarks=world,
+        image_aspect=aspect,
     )
+
+
+#: 米制 3D 手（原点在手部几何中心，单位米）。三个骨长用真实比例：
+#: 近节 0.045 / 中节 0.028 / 末节 0.022 —— 完全伸直时「弦长 ÷ 骨长和」= 1.0。
+_WORLD_KNUCKLES_Y = -0.020
+_BONE_PROX, _BONE_MID, _BONE_DIST = 0.045, 0.028, 0.022
+
+
+def world_hand(
+    *,
+    index_extended: bool = True,
+    middle_extended: bool = True,
+    ring_extended: bool = False,
+    pinky_extended: bool = False,
+) -> tuple[Landmark, ...]:
+    """构造米制 3D 手部关键点，可逐指指定"伸直 / 蜷起"。
+
+    ``world_landmarks`` 是 MediaPipe 的**米制 3D 骨架**（原点在手心），
+    判据在它上面量「这根手指直不直」才是量手指本体：没有画面宽高比失真，
+    也没有透视压缩。伸直时 ``|MCP→TIP| ÷ 骨长和`` ≈ 1.0，蜷起时约 0.5。
+
+    布局：y 轴大致沿手指方向（掌心 → 指尖为正），x 轴沿掌指关节排，
+    四指分别落在 x = -0.024 / -0.008 / 0.008 / 0.024 上。
+    """
+
+    points: list[Landmark] = [Landmark(0.0, 0.0, 0.0)] * 21
+    points[0] = Landmark(0.0, -0.085, 0.0)  # wrist
+    xs = {"index": -0.024, "middle": -0.008, "ring": 0.008, "pinky": 0.024}
+    y = _WORLD_KNUCKLES_Y
+    for name, (mcp, pip, dip, tip) in (
+        ("index", (5, 6, 7, 8)),
+        ("middle", (9, 10, 11, 12)),
+        ("ring", (13, 14, 15, 16)),
+        ("pinky", (17, 18, 19, 20)),
+    ):
+        x = xs[name]
+        extended = {
+            "index": index_extended,
+            "middle": middle_extended,
+            "ring": ring_extended,
+            "pinky": pinky_extended,
+        }[name]
+        points[mcp] = Landmark(x, y, 0.0)
+        if extended:
+            points[pip] = Landmark(x, y + _BONE_PROX, 0.0)
+            points[dip] = Landmark(x, y + _BONE_PROX + _BONE_MID, 0.0)
+            points[tip] = Landmark(x, y + _BONE_PROX + _BONE_MID + _BONE_DIST, 0.0)
+        else:
+            # 蜷起：中节抬起、末节折回掌心，弦长被压到骨长和的一半左右。
+            points[pip] = Landmark(x, y + _BONE_PROX, 0.0)
+            points[dip] = Landmark(x, y + _BONE_PROX + 0.012, 0.0)
+            points[tip] = Landmark(x, y + _BONE_PROX - 0.004, 0.0)
+    # 拇指：只求几何合理，判据不用它。
+    points[1] = Landmark(-0.030, -0.070, 0.0)
+    points[2] = Landmark(-0.042, -0.050, 0.0)
+    points[3] = Landmark(-0.052, -0.030, 0.0)
+    points[4] = Landmark(-0.058, -0.012, 0.0)
+    return tuple(points)
 
 
 class ArrivalClock:

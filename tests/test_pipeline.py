@@ -9,7 +9,7 @@ from handmouse.mouse import MouseController, NullMouseBackend
 from handmouse.pipeline import ControlWorker
 from handmouse.screen_map import ScreenMap
 
-from conftest import left_pinch_points, observation
+from conftest import left_pinch_points, observation, pointer_points
 
 BASE = 1_000_000_000
 
@@ -68,3 +68,48 @@ def test_tick_state_transition_is_reported() -> None:
 
     assert engine.current_gesture is GestureType.LOST
     assert reported, "手部丢失迁移没有回调 on_state：日志与快照会停在旧手势"
+
+
+def test_advance_motion_reaches_backend_with_facade_mouse() -> None:
+    """回归（2026-10-21 实机事故）：门面类必须转发 set_snap_engaged。
+
+    事故：该方法最初只加在底层 Win32MouseBackend 上，门面 MouseController
+    没转发——实机上光标第一次要动，_advance_motion 就 AttributeError 崩掉
+    控制线程，光标永久卡死、HUD 冻结在最后状态。旧测试恰好只在
+    PINCH_ARMED（提前 return）时调 _advance_motion，没盖住这条路径。
+    """
+
+    backend = NullMouseBackend(ScreenMap(dpi_aware=False))
+    engine = GestureEngine(AppConfig())
+    worker = ControlWorker(
+        LatestSlot(),
+        engine,
+        MouseController(backend),
+        threading.Event(),
+        lambda _gesture, _paused: None,
+        interpolation_ms=42,
+    )
+    engine.process(observation(pointer_points(), BASE))
+    assert engine.current_gesture is GestureType.POINTER
+
+    now = time.monotonic_ns()
+    worker._execute_commands(
+        [MouseCommand(MouseCommandType.MOVE, now, x=0.20, y=0.30)],
+    )
+    # 第二个目标触发真正的插值动画（第一个目标会被直接落位）。
+    worker._execute_commands(
+        [MouseCommand(MouseCommandType.MOVE, now + 1, x=0.80, y=0.70)],
+    )
+    moves_before = [item for item in backend.commands if item[0] == "move"]
+    worker._advance_motion(now + 20_000_000)
+    moves_after = [item for item in backend.commands if item[0] == "move"]
+
+    assert len(moves_after) > len(moves_before), "插值移动没有到达后端"
+
+
+def test_facade_mouse_set_snap_engaged_is_safe_for_all_backends() -> None:
+    """门面 set_snap_engaged 在有/无磁吸的后端上都必须可用。"""
+
+    facade = MouseController(NullMouseBackend(ScreenMap(dpi_aware=False)))
+    facade.set_snap_engaged(True)  # 不应抛异常（NullMouseBackend 无磁吸）
+    facade.set_snap_engaged(False)

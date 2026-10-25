@@ -254,3 +254,206 @@ def test_thumb_axis_cross_flips_sign_under_horizontal_mirror() -> None:
     cross_m, _, _ = _thumb_axis_cross(mirrored)
 
     assert np.isclose(cross_m, -cross)
+
+
+# ---------------- 摄像头分辨率协商（别人的硬件要能跑）----------------
+
+
+class _FormatCapture:
+    """假摄像头：只认 ``supported`` 里的档位。
+
+    ``garbage=True`` 模拟那种"不支持的档位不拒绝、直接回报 0×0"的驱动——
+    这正是必须读回实际值的理由。
+    """
+
+    def __init__(
+        self,
+        native: tuple[int, int],
+        supported: set[tuple[int, int]],
+        fps: float = 30.0,
+        garbage: bool = False,
+    ) -> None:
+        self._size = tuple(native)
+        self._supported = {tuple(size) for size in supported}
+        self._fps = float(fps)
+        self._garbage = garbage
+        self._pending_w: int | None = None
+
+    def set(self, prop: int, value: float) -> bool:
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            self._pending_w = int(value)
+        elif prop == cv2.CAP_PROP_FRAME_HEIGHT and self._pending_w is not None:
+            want = (self._pending_w, int(value))
+            if want in self._supported:
+                self._size = want
+            elif self._garbage:
+                self._size = (0, 0)
+        return True
+
+    def get(self, prop: int) -> float:
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(self._size[0])
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self._size[1])
+        if prop == cv2.CAP_PROP_FPS:
+            return self._fps
+        return 0.0
+
+
+def _format_worker(config: AppConfig, warnings: list[str]) -> CameraWorker:
+    return CameraWorker(
+        config,
+        LatestSlot(),
+        threading.Event(),
+        lambda _message: None,
+        lambda _packet: None,
+        warnings.append,
+    )
+
+
+def test_camera_keeps_configured_resolution_when_supported() -> None:
+    config = AppConfig()
+    warnings: list[str] = []
+    worker = _format_worker(config, warnings)
+    capture = _FormatCapture((640, 480), {(640, 480)})
+
+    worker._negotiate_format(capture)  # type: ignore[arg-type]
+
+    assert worker.actual_size == (640, 480)
+    # 按要求拿到就不该打扰用户。
+    assert warnings == []
+
+
+def test_camera_reports_real_size_when_driver_silently_ignores_request() -> None:
+    """用户的摄像头只能给 16:9（720p）：如实记录，并告诉用户已自动适配。"""
+
+    config = AppConfig()
+    warnings: list[str] = []
+    worker = _format_worker(config, warnings)
+    capture = _FormatCapture((1280, 720), {(1280, 720)})
+
+    worker._negotiate_format(capture)  # type: ignore[arg-type]
+
+    # set() 返回 True 但驱动没变 —— 不读回就会以为自己在 640×480 上。
+    assert worker.actual_size == (1280, 720)
+    assert any("1280×720" in message for message in warnings)
+
+
+def test_camera_falls_back_when_driver_returns_garbage_size() -> None:
+    config = AppConfig()
+    config.camera_width, config.camera_height = 1024, 768
+    warnings: list[str] = []
+    worker = _format_worker(config, warnings)
+    capture = _FormatCapture((0, 0), {(640, 480)}, garbage=True)
+
+    worker._negotiate_format(capture)  # type: ignore[arg-type]
+
+    assert worker.actual_size == (640, 480)
+
+
+def test_camera_fallback_can_be_switched_off() -> None:
+    """``camera_allow_fallback=False``：拿不到就按配置认了，不做降级。"""
+
+    config = AppConfig()
+    config.camera_width, config.camera_height = 1024, 768
+    config.camera_allow_fallback = False
+    warnings: list[str] = []
+    worker = _format_worker(config, warnings)
+    capture = _FormatCapture((0, 0), {(640, 480)}, garbage=True)
+
+    worker._negotiate_format(capture)  # type: ignore[arg-type]
+
+    assert worker.actual_size == (1024, 768)
+
+
+def test_camera_warns_when_actual_fps_is_far_below_config() -> None:
+    config = AppConfig()
+    config.camera_fps = 30
+    warnings: list[str] = []
+    worker = _format_worker(config, warnings)
+    capture = _FormatCapture((640, 480), {(640, 480)}, fps=10.0)
+
+    worker._negotiate_format(capture)  # type: ignore[arg-type]
+
+    assert worker.actual_fps == 10.0
+    assert any("帧率" in message for message in warnings)
+
+
+def _patch_capture(monkeypatch, opened: bool = True) -> list[int | None]:
+    """替换 cv2.VideoCapture，记录每次打开时传的 apiPreference。"""
+
+    calls: list[int | None] = []
+
+    class _Cap:
+        def __init__(self, index: int, backend: int | None = None) -> None:
+            calls.append(backend)
+            self._opened = opened
+
+        def isOpened(self) -> bool:
+            return self._opened
+
+        def release(self) -> None:
+            pass
+
+        def set(self, *_args: object) -> bool:
+            return True
+
+        def get(self, _prop: int) -> float:
+            return 0.0
+
+    import handmouse.vision as vision_module
+
+    monkeypatch.setattr(vision_module.cv2, "VideoCapture", _Cap)
+    return calls
+
+
+def test_camera_backend_defaults_to_dshow(monkeypatch) -> None:
+    """默认走兼容性最好的 dshow，行为与历史一致。"""
+
+    calls = _patch_capture(monkeypatch)
+    worker = _format_worker(AppConfig(), [])
+
+    worker._open_camera()
+
+    assert calls[0] == cv2.CAP_DSHOW
+
+
+def test_camera_backend_can_be_switched_to_msmf(monkeypatch) -> None:
+    """实测：两只摄像头在 dshow 下只有 10~24fps，msmf 能跑满 30fps。"""
+
+    calls = _patch_capture(monkeypatch)
+    config = AppConfig()
+    config.camera_backend = "msmf"
+    worker = _format_worker(config, [])
+
+    worker._open_camera()
+
+    assert calls[0] == cv2.CAP_MSMF
+
+
+def test_camera_backend_unknown_value_falls_back_to_dshow(monkeypatch) -> None:
+    calls = _patch_capture(monkeypatch)
+    config = AppConfig()
+    config.camera_backend = "obs-virtual-cam"
+    config.validate()
+
+    assert config.camera_backend == "dshow"
+
+    worker = _format_worker(config, [])
+    worker._open_camera()
+    assert calls[0] == cv2.CAP_DSHOW
+
+
+def test_camera_backend_retries_default_when_configured_one_fails(monkeypatch) -> None:
+    """配置的后端打不开时退回默认后端 —— 能开总比开不了强。"""
+
+    calls = _patch_capture(monkeypatch, opened=False)
+    config = AppConfig()
+    config.camera_backend = "msmf"
+    worker = _format_worker(config, [])
+
+    worker._open_camera()
+
+    assert calls[0] == cv2.CAP_MSMF
+    # 第二次构造不带 apiPreference（OpenCV 自己挑）
+    assert calls[1] is None

@@ -18,13 +18,34 @@ def map_activity_region(
     margin_x: float,
     margin_y: float,
 ) -> tuple[float, float]:
-    """将摄像头活动区域线性映射到主屏幕归一化坐标。"""
+    """将摄像头活动区域线性映射到主屏幕归一化坐标（四边等距内缩）。"""
 
-    width = max(0.01, 1.0 - 2.0 * margin_x)
-    height = max(0.01, 1.0 - 2.0 * margin_y)
+    return map_activity_region_edges(x, y, margin_x, margin_y, margin_x, margin_y)
+
+
+def map_activity_region_edges(
+    x: float,
+    y: float,
+    margin_left: float,
+    margin_top: float,
+    margin_right: float,
+    margin_bottom: float,
+) -> tuple[float, float]:
+    """四边可独立内缩的活动区映射。
+
+    为什么需要非对称：用户的真实可达范围很少是画面正中一块。实测常见情形是
+    **上部够不到、下部能到**（手举高了会出画，放低了反而自由），或者左右不对称。
+    对称内缩 ``[m, 1-m]`` 无法表达这种范围，只能牺牲一边 ——
+    表现为"手指顶到画面边缘了，光标却到不了屏幕边缘"。
+
+    传四边各自的内缩量，就能把用户**实际能到的那块矩形**铺满整个屏幕。
+    """
+
+    width = max(0.01, 1.0 - margin_left - margin_right)
+    height = max(0.01, 1.0 - margin_top - margin_bottom)
     return (
-        clamp((x - margin_x) / width),
-        clamp((y - margin_y) / height),
+        clamp((x - margin_left) / width),
+        clamp((y - margin_top) / height),
     )
 
 

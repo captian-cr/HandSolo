@@ -89,13 +89,16 @@ def test_grid_is_centered() -> None:
     assert left == pytest.approx(1920 - right, abs=1)
 
 
-def test_grid_wraps_at_four_columns() -> None:
-    layout = grid_layout(12, 1920, 1080, CFG)
+def test_grid_wraps_at_configured_column_count() -> None:
+    """换行位置跟随配置，不写死列数——否则调布局就会连带挂测试。"""
 
-    first_row = {layout.icon_boxes[i][1] for i in range(4)}
+    cols = CFG.cols
+    layout = grid_layout(cols * 2, 1920, 1080, CFG)
+
+    first_row = {layout.icon_boxes[i][1] for i in range(cols)}
     assert len(first_row) == 1
-    assert layout.icon_boxes[4][1] > layout.icon_boxes[0][1]
-    assert layout.icon_boxes[4][0] == pytest.approx(layout.icon_boxes[0][0])
+    assert layout.icon_boxes[cols][1] > layout.icon_boxes[0][1]
+    assert layout.icon_boxes[cols][0] == pytest.approx(layout.icon_boxes[0][0])
 
 
 def test_labels_sit_below_icons() -> None:

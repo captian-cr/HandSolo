@@ -49,7 +49,7 @@ def ascii_safe_model_path(source: Path) -> Path:
     """返回一个 ASCII 路径下的模型副本。
 
     MediaPipe 的 C++ 层在 Windows 上无法打开含非 ASCII 字符的路径——项目
-    放在 ``D:/trae-cn/手势追踪`` 这类目录下时会直接抛
+    放在中文目录下（例如 ``D:/某个/中文路径/手势追踪``）时会直接抛
     ``RuntimeError: Unable to open file``。这里在路径非 ASCII 时把模型复制
     到临时目录的一份 ASCII 路径上使用；复制后按文件大小做一次幂等校验。
     """

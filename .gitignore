@@ -10,3 +10,24 @@ dist/
 
 # 实机验证日志（保留在磁盘，但不进版本库）
 logs/
+
+# 采集样本：个人手部关键点数据，体积大且属于生物特征，不随仓库分发
+gesture_data/
+
+# 本机配置：里面会写入用户自己的标定结果（活动范围 / 拒识阈值），
+# 属于"运行状态"而不是源码。首次启动会按代码默认值自动生成。
+config.json
+# 同理：grid_config.json 是 grid_select / 主题布局工具回写的运行状态
+# （相机序号、ROI、灵敏度、壁纸），缺文件时按 DEFAULT_CONFIG 自动生成。
+grid_config.json
+
+# 配置备份（每次改参数脚本都会留一份，属于本机历史）
+config.json.bak-*
+*.bak
+
+# 双击启动器：`scripts/make_launchers.py` 生成，里面写死了**本机**的
+# python.exe 绝对路径，提交上去对别人没用、还会让人以为双击就能跑
+*.bat
+
+# 本机截图（UI 预览，不随仓库分发）
+theme-preview.png

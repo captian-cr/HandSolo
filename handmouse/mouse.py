@@ -19,7 +19,11 @@ from typing import Protocol
 
 from handmouse.config import AppConfig
 from handmouse.contracts import MouseCommand, MouseCommandType
-from handmouse.cursor_snap import CursorSnapService, WindowsUiAutomationProbe
+from handmouse.cursor_snap import (
+    CursorSnapService,
+    DesktopIconProbe,
+    WindowsUiAutomationProbe,
+)
 from handmouse.screen_map import ScreenMap
 
 
@@ -111,6 +115,7 @@ class Win32MouseBackend:
         if os.name != "nt":
             raise RuntimeError("手势鼠标的鼠标注入仅支持 Windows")
         self.screen_map = screen_map
+        self._config = config
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._user32.SendInput.argtypes = (
             wintypes.UINT,
@@ -120,6 +125,9 @@ class Win32MouseBackend:
         self._user32.SendInput.restype = wintypes.UINT
         self._left_is_down = False
         self._snap_suspended = False
+        #: 磁吸窗口开关：仅当"预捏合窗口"内才允许磁吸（cursor_snap_windowed）。
+        #: pipeline 每帧据 engine.snap_engaged 刷新；默认 False（平时不吸）。
+        self._snap_engaged = False
         self._lock = threading.Lock()
         width, height = self.screen_map.size
         origin_x, origin_y = self.screen_map.origin
@@ -133,6 +141,12 @@ class Win32MouseBackend:
             screen_signature=self.screen_map.describe(),
             enabled=config.cursor_snap_enabled,
             radius_px=config.cursor_snap_radius_px,
+            max_speed_px_s=getattr(config, "cursor_snap_max_speed_px_s", 1500.0),
+            inside_only=getattr(config, "cursor_snap_inside_only", True),
+            to_center=getattr(config, "cursor_snap_to_center", True),
+            # 桌面图标不是 UIA 可点控件（实测探测会返回任务栏按钮），
+            # 必须走图标矩形这条备用源。
+            fallback_probe=DesktopIconProbe(),
         )
 
     def _send(
@@ -184,7 +198,11 @@ class Win32MouseBackend:
             self._send_key(virtual_key, self.KEYUP)
 
     def move(self, x: float, y: float) -> None:
-        if not self._snap_suspended:
+        # 磁吸默认只在"预捏合窗口"内生效（cursor_snap_windowed=True）：
+        # 窗口开合由 ``snap_window_open`` 统一裁决——它比 ``_snap_engaged``
+        # 多一层"关窗后释放宽限"，避免窗口抖动时把光标在吸附点与随手位置
+        # 之间来回甩（2026-10-23 修"两个小图标之间左右弹跳"）。
+        if not self._snap_suspended and self._snapper.snap_window_open(x, y):
             x, y = self._snapper.transform(x, y)
         # 归一化以 ScreenMap 的注入坐标系为基准换算成 0—65535 绝对坐标；
         # 多屏时补上 VIRTUALDESK，否则会被系统钳回主屏。
@@ -255,11 +273,32 @@ class Win32MouseBackend:
             return None
         return self._snapper.target_name
 
+    @property
+    def snap_target_rect(self) -> tuple[int, int, int, int] | None:
+        """当前吸附目标的屏幕矩形，供全屏光环层使用。"""
+
+        if self._snap_suspended:
+            return None
+        return self._snapper.target_rect
+
     def update_config(self, config: AppConfig) -> None:
+        self._config = config
         self._snapper.configure(
             enabled=config.cursor_snap_enabled,
             radius_px=config.cursor_snap_radius_px,
         )
+
+    def set_snap_engaged(self, engaged: bool) -> None:
+        """由 pipeline 每帧据 engine.snap_engaged 刷新磁吸窗口开关。
+
+        仅在 cursor_snap_windowed=True 时有意义；窗口化关闭时 move() 会忽略它。
+        同时把状态透传给磁吸服务，让后台 UI Automation 探测只在临近点击时工作。
+        """
+        self._snap_engaged = bool(engaged)
+        windowed = getattr(self._config, "cursor_snap_windowed", True)
+        # 非窗口化（旧行为）时磁吸常开：探测线程始终工作。
+        # 窗口化时只有 engaged=True 才让后台探测工作。
+        self._snapper.set_engaged(True if not windowed else bool(engaged))
 
     def shutdown(self) -> None:
         self.release_all()
@@ -312,6 +351,10 @@ class NullMouseBackend:
 
     @property
     def snap_target_name(self) -> str | None:
+        return None
+
+    @property
+    def snap_target_rect(self) -> tuple[int, int, int, int] | None:
         return None
 
     def update_config(self, config: AppConfig) -> None:
@@ -370,8 +413,26 @@ class MouseController:
     def snap_target_name(self) -> str | None:
         return getattr(self.backend, "snap_target_name", None)
 
+    @property
+    def snap_target_rect(self) -> tuple[int, int, int, int] | None:
+        return getattr(self.backend, "snap_target_rect", None)
+
     def update_config(self, config: AppConfig) -> None:
         self.backend.update_config(config)
+
+    def set_snap_engaged(self, engaged: bool) -> None:
+        """转发磁吸窗口开关到底层后端（pipeline 每帧调用）。
+
+        同时把"是否处于预捏合窗口"透传给磁吸服务：窗口化时只有临近点击才
+        让后台 UI Automation 探测线程工作，平时完全静默（性能修复）。
+        2026-10-21 教训：这个方法最初只加在 Win32MouseBackend 上，门面类
+        没转发，控制线程每帧 AttributeError 当场崩死、光标永久卡住——
+        门面新增能力必须同步补转发。
+        """
+        self._snap_engaged = bool(engaged)
+        backend_setter = getattr(self.backend, "set_snap_engaged", None)
+        if backend_setter is not None:
+            backend_setter(bool(engaged))
 
     def shutdown(self) -> None:
         try:

@@ -42,7 +42,7 @@ from handmouse.grid_judge import PinchJudger
 from handmouse.grid_map import map_roi, scale_roi
 from handmouse.grid_select import DEFAULT_CONFIG_PATH, HandPoller, load_config
 from handmouse.grid_ui import PointerState
-from handmouse.hand_pose import classify_pose
+from handmouse.hand_pose import EXTEND_RATIO, classify_pose, finger_ratio
 from handmouse.theme_config import load_theme_config
 from handmouse.theme_ui import PER_PAGE, ThemeApp, ThemePanel
 from handmouse.virtual_desktop import open_new_desktop
@@ -110,6 +110,8 @@ class ThemeRunner:
     _frozen: tuple[float, float] | None = field(default=None, init=False)
     _action: str = field(default="", init=False)
     _action_until: float = field(default=0.0, init=False)
+    _last_raw: tuple[float, float] | None = field(default=None, init=False)
+    _jump_streak: int = field(default=0, init=False)
     _swing_track: list[tuple[float, float]] = field(default_factory=list, init=False)
     _swing_ready: float = field(default=0.0, init=False)
     #: 最近一次指中的分类标签（``tab`` 区域没有下标，只能靠它传递）。
@@ -140,6 +142,19 @@ class ThemeRunner:
 
         pose = classify_pose(sample.points) if sample.points else "other"
         self.state.pose = pose
+        if sample.points:
+            self.state.finger_hint = (
+                f"阈值{EXTEND_RATIO:.2f}　"
+                + " ".join(
+                    f"{label}{finger_ratio(sample.points, name):.2f}"
+                    for label, name in (
+                        ("食", "index"), ("中", "middle"),
+                        ("无", "ring"), ("小", "pinky"),
+                    )
+                )
+            )
+        else:
+            self.state.finger_hint = ""
         self.state.ratio = sample.ratio
         self.state.hand_visible = pose in {"point", "open"}
 
@@ -181,10 +196,22 @@ class ThemeRunner:
                 self._frozen = (self._sx, self._sy)
         else:
             self._frozen = None
-            tau = max(0.005, float(self.config.get("pointer_smoothing_s", 0.075)))
-            alpha = 1.0 - math.exp(-dt / tau) if dt > 0 else 0.0
-            self._sx += (nx - self._sx) * alpha
-            self._sy += (ny - self._sy) * alpha
+            # 跳变抑制：关键点偶发跳到画面另一头时，单帧位移会极大。不过滤
+            # 的话光标会"瞬移"一下再飘回，看起来就像识别不准。
+            accept = True
+            if self._last_raw is not None:
+                jump = math.hypot(nx - self._last_raw[0], ny - self._last_raw[1])
+                if jump > 0.28:
+                    self._jump_streak += 1
+                    accept = self._jump_streak >= 3
+                else:
+                    self._jump_streak = 0
+            self._last_raw = (nx, ny)
+            if accept:
+                tau = max(0.005, float(self.config.get("pointer_smoothing_s", 0.075)))
+                alpha = 1.0 - math.exp(-dt / tau) if dt > 0 else 0.0
+                self._sx += (nx - self._sx) * alpha
+                self._sy += (ny - self._sy) * alpha
 
         if self._frozen is not None:
             self.state.x, self.state.y = self._frozen
@@ -193,6 +220,10 @@ class ThemeRunner:
 
         px = int(self.state.x * self.panel.screen_w)
         py = int(self.state.y * self.panel.screen_h)
+        # 系统光标跟着环走，两者重合。不移的话用户会看到鼠标停在原处不动，
+        # 以为程序没在响应。
+        if not self.dry_run:
+            ctypes.windll.user32.SetCursorPos(px, py)
 
         where, index = self._resolve(px, py)
         self.state.target = index if where == "icon" else None
