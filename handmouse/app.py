@@ -286,8 +286,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  还 没 录 过 你 自 己 的 手 势 习 惯")
         print("  现在用的阈值是作者按他自己的手标定的，换一个人会明显不跟手。")
         print("  花两分钟录一遍你自己的（**只需做一次**，之后不再提醒）：")
-        print("      python -m handmouse --onboarding")
-        print("  （或者：双击 「HandSolo（首次设置）.bat」）")
+        for line in _onboarding_hint():
+            print(f"      {line}")
         print("!" * 62)
         print()
 
@@ -678,6 +678,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[取证] 共保存 {recorder.saved} 帧到 {recorder.directory}")
     print(f"退出。DPI={dpi_state()}")
     return exit_code
+
+
+def _onboarding_hint() -> list[str]:
+    """首次设置该怎么启动 —— 源码运行和单文件 exe 是两条不同的命令。
+
+    🔴 打包成 exe 的用户既没有 Python 也没有那几份 .bat，
+    给他 `python -m handmouse --onboarding` 等于什么都没说。
+    """
+
+    if getattr(sys, "frozen", False):
+        name = Path(sys.executable).name or "HandSolo.exe"
+        return [
+            f'双击同目录的 {name}，或命令行加参数：',
+            f'  {name} --onboarding',
+        ]
+    return [
+        "python -m handmouse --onboarding",
+        "（或者：双击 「HandSolo（首次设置）.bat」）",
+    ]
 
 
 def _set_preview(state: SimpleNamespace, want: bool | None) -> bool:

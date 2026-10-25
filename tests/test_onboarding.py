@@ -368,3 +368,65 @@ def test_calibration_only_never_touches_the_sample_library() -> None:
     assert re.search(r"\brun_collect\s*\(", source) is None
     assert "_apply_margins" in source
     assert "ConfigStore().save" in source
+
+
+def test_frozen_log_dir_follows_project_root(monkeypatch, tmp_path) -> None:
+    """打包成 exe 后日志必须写在 exe 所在目录，不能落在解压用的临时目录。
+
+    2026-10-25 打包实测踩到的：`__main__._ensure_output()` 自己拼了
+    `Path(__file__).parent.parent / "logs"` —— 单文件 exe 的 `__file__` 在
+    PyInstaller 的一次性解压目录里，日志写进去**退出即随目录删除**，
+    于是"双击没反应、也找不到日志"。
+
+    🔴 必须在测试函数体内打补丁改 sys.stdout：pytest 的全局捕获会在 fixture
+    之后重新赋值，fixture 里改无效。
+    """
+
+    import sys
+
+    from handmouse import __main__ as entry
+
+    fake_root = tmp_path / "exe_dir"
+    fake_root.mkdir()
+
+    import handmouse.config as config_module
+
+    monkeypatch.setattr(config_module, "PROJECT_ROOT", fake_root)
+
+    saved = (sys.stdout, sys.stderr)
+    try:
+        sys.stdout = None  # type: ignore[assignment]
+        sys.stderr = None  # type: ignore[assignment]
+        path = entry._ensure_output()
+    finally:
+        got = (sys.stdout, sys.stderr)
+        sys.stdout, sys.stderr = saved
+        for handle in got:
+            if handle is not None and hasattr(handle, "close"):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+    assert path is not None
+    assert path.parent == fake_root / "logs", f"日志跑到了 {path.parent}"
+
+
+def test_onboarding_hint_adapts_to_frozen_build(monkeypatch) -> None:
+    """exe 用户没有 Python，也不该被指去双击 .bat。"""
+
+    import sys
+
+    from handmouse import app as app_module
+
+    # 源码形态
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    source_hint = " ".join(app_module._onboarding_hint())
+    assert "python -m handmouse --onboarding" in source_hint
+
+    # 冻结形态：命令必须是 exe 自己
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"D:/somewhere/HandSolo.exe")
+    frozen_hint = " ".join(app_module._onboarding_hint())
+    assert "HandSolo.exe --onboarding" in frozen_hint
+    assert "python -m handmouse" not in frozen_hint

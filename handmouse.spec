@@ -24,7 +24,7 @@ import os  # 只用于拼图标路径
 #     以 exe 自身所在目录为基准，因此 DEFAULT_CONFIG_PATH 就是
 #     "<exe同级目录>/config.json"；首次运行若缺失，ConfigStore 会写入默认
 #     配置，写在 exe 旁边不会丢失。需要把配置放到别处时用 `--config <路径>`。
-#   * excludes 排掉的重依赖（PySide6/PyQt5/PyQt6/shiboken6/tkinter/
+#   * excludes 排掉的重依赖（PySide6/PyQt5/PyQt6/shiboken6/
 #     IPython/pytest/setuptools）本项目运行路径根本没 import。其中
 #     PySide6 虽在 ui extra 但 MVP 未实现。setuptools 被排有极小风险：
 #     若将来某个依赖走 pkg_resources 会失败；目前闭包内无此用法。
@@ -34,7 +34,9 @@ import os  # 只用于拼图标路径
 #     故保留。
 #   * onefile 写法：单个 EXE(...) 直接吃 a.binaries/a.datas，**不写
 #     COLLECT**（写了就变成 onedir 目录）。
-#   * console=True：本程序是带 OpenCV 调试窗口的 CLI，保留控制台便于看日志。
+#   * console=False：双击不弹黑窗口（与 pythonw 启动器一致）。代价是看不到 traceback，
+#     所以日志必须落到 logs/，启动失败必须弹系统对话框 —— 都由
+#     handmouse/__main__.py 负责（_ensure_output / _notify_no_console）。
 
 block_cipher = None
 
@@ -60,7 +62,10 @@ excludes = [
     "PyQt5",
     "PyQt6",
     "shiboken6",
-    "tkinter",
+    # 🔴 **tkinter 不能排除**（2026-10-25 打包实测）：`handmouse/snap_ui.py`
+    # 在模块顶层 `import tkinter`，而 app.py 会 import 到它 →
+    # 排除后 exe 直接 `ModuleNotFoundError: No module named 'tkinter'` 起不来。
+    # 这个排除项是打包配置写早了的遗留（那会儿还没有 snap_ui）。
     "IPython",
     "pytest",
     "setuptools",
@@ -93,7 +98,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="handmouse",
+    name="HandSolo",
     icon=_ICON,
     debug=False,
     bootloader_ignore_signals=False,
@@ -101,7 +106,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    # console=False：双击不弹黑窗口（否则用户第一反应是"这什么鬼"）。
+    # 出错走 handmouse/__main__._notify_no_console 的系统弹窗 + logs/ 里的日志，
+    # 与 pythonw 启动器同一套路径。
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

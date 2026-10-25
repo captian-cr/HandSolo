@@ -159,6 +159,36 @@ PyInstaller 退回默认图标而不是报错。测试会验证 ico 里确实有
 测试 `553 → 556 passed`（+3：ico 尺寸、`onboarding_reminded` 默认值与校验、
 `--recalibrate` 不碰样本库）。
 
+### 一·九八、打包成免安装 exe（他的要求：两个版本都挂上去让人选）
+
+他问「我们的代码一定要安装 Python 才能使用吗」，接着说「难道不能在上面挂 python 版和
+exe 版吗，让他们自己选就好了」—— 对，这才是标准做法。
+
+**第一次真正跑 `pyinstaller handmouse.spec`**，结果 `dist/HandSolo.exe` **117MB**、
+无控制台、图标已嵌入、带预览窗跑 6 秒共 11.8 秒（含 onefile 解压 2~4 秒）。
+
+一次打包抓出 **3 个"源码跑得好、打包就崩"** 的问题：
+
+1. 🔴 **`excludes` 里有 `tkinter`** —— 那是打包配置写早了（当时还没有 `snap_ui.py`），
+   而 `snap_ui.py` **在模块顶层** `import tkinter`，`app.py` 又会 import 到它 →
+   exe 直接 `ModuleNotFoundError: No module named 'tkinter'` 起不来。已从 excludes 移除。
+2. 🔴 **日志写到一次性解压目录** —— `__main__._ensure_output()` 自己拼
+   `Path(__file__).parent.parent / "logs"`；单文件 exe 的 `__file__` 在 PyInstaller 的
+   临时解压目录里，日志写进去**退出即随目录删除** → 用户双击后"什么都没有，也查不到日志"。
+   改用 `config.PROJECT_ROOT`（它本来就有 frozen 分支，返回 exe 所在目录）。
+   已用 `DETACHED_PROCESS` 启动（等价于双击、无标准句柄）验证日志落在 exe 同目录。
+3. 🔴 **首次提醒的文案对 exe 用户无效** —— 提示让人跑 `python -m handmouse --onboarding`，
+   而 exe 用户既没 Python 也没有那几份 `.bat`。新增 `_onboarding_hint()`，
+   按 `sys.frozen` 输出 `HandSolo.exe --onboarding`。
+
+顺带把 `console` 从 `True` 改成 `False`（双击不弹黑窗口，出错走系统弹窗 + `logs/`，
+与 pythonw 启动器同一套路径），exe 名从 `handmouse` 改成产品名 `HandSolo`。
+
+测试 `556 → 558 passed`（+2：frozen 日志目录用 `PROJECT_ROOT`、`_onboarding_hint` 两种形态）。
+打包清单与三个坑写进 `docs/release.md` §1.5。
+
+⚠️ **仍未验证**：在**没装 Python 的干净机器**上双击。这一步只能人来做。
+
 ### 二、提醒机制
 
 `config.onboarding_done` 默认 **False**：每次启动打印一段醒目提示（不阻断——

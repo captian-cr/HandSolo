@@ -85,7 +85,12 @@ def _ensure_output(log_dir: Path | None = None) -> Path | None:
     path: Path | None = None
     handle: IO[str]
     try:
-        directory = log_dir or Path(__file__).resolve().parent.parent / "logs"
+        # 🔴 必须用 config.PROJECT_ROOT，不能自己拼 `__file__`：打包成单 exe 后
+        # `__file__` 在 PyInstaller 的一次性解压目录里，日志写进去退出就没了
+        # （2026-10-25 打包实测：窗口版双击 → 什么都没有，也查不到日志）。
+        from handmouse.config import PROJECT_ROOT
+
+        directory = log_dir or PROJECT_ROOT / "logs"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"handmouse-{time.strftime('%Y%m%d')}.log"
         handle = path.open("a", encoding="utf-8", buffering=1)
@@ -125,7 +130,7 @@ def main() -> int:
         return 0
 
     if log_path is not None:
-        print(f"无控制台启动（pythonw），输出已重定向到 {log_path}")
+        print(f"无控制台启动（窗口版），输出已重定向到 {log_path}")
 
     try:
         from handmouse.app import main as app_main
