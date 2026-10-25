@@ -370,6 +370,7 @@ python -m handmouse --diagnostic-seconds 20  :: 跑 20 秒后打印指标并退�
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | 故障排查：启动 / 光标 / 点击 / 识别 / 磁吸 / 性能，每类都是"症状 → 真因 → 动作" |
 | [`docs/tuning.md`](docs/tuning.md) | 调参指南：按症状查表、方法论、什么时候该换方案 |
 | [`docs/known-issues.md`](docs/known-issues.md) | 已知问题清单（含编号） |
+| [`docs/design-phase2.md`](docs/design-phase2.md) | 架构决策记录：为什么移植 Vimoose 的引擎层、被否决的备选、依赖实测 |
 | [`docs/release.md`](docs/release.md) | 发布清单（维护者向）：发版前要过哪些闸门、怎么写 CHANGELOG |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么，以及**为什么**改 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献方式、三条铁律、改判据的正确姿势 |

@@ -31,3 +31,6 @@ config.json.bak-*
 
 # 本机截图（UI 预览，不随仓库分发）
 theme-preview.png
+
+# Trae IDE 工作目录（内容已迁到 docs/design-phase2.md，别把 IDE 状态提交上来）
+.trae/
