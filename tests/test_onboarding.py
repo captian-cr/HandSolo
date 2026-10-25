@@ -312,3 +312,59 @@ def test_axis_half_uses_default_when_span_is_tiny() -> None:
     assert _axis_half(0.20, 0.34) == pytest.approx(0.125)
     # 跨度大到算出超过默认值时，仍以默认为上限
     assert _axis_half(1.0, 0.34) == 0.34
+
+
+def test_app_icon_is_a_real_multi_size_ico() -> None:
+    """应用图标必须是多尺寸 ico —— Windows 会按场景挑 16/32/48/256。"""
+
+    from pathlib import Path
+
+    from PIL import Image
+
+    root = Path(__file__).resolve().parent.parent
+    ico = root / "assets" / "hand-solo.ico"
+    png = root / "docs" / "icon.png"
+
+    assert ico.exists(), "缺少 assets/hand-solo.ico（打包与任务栏图标都用它）"
+    assert png.exists(), "缺少 docs/icon.png（README 顶部展示用）"
+
+    with Image.open(ico) as image:
+        sizes = {size for size in image.info.get("sizes", set())}
+    # Pillow 读 ico 时 sizes 在 info 里；老版本可能只给当前帧尺寸
+    assert (32, 32) in sizes or image.size[0] >= 32
+    assert len(sizes) >= 4, f"ico 里尺寸太少：{sorted(sizes)}"
+
+    with Image.open(png) as image:
+        assert image.size == (512, 512)
+        assert image.mode == "RGBA"
+
+
+def test_onboarding_reminded_defaults_to_false_and_survives_validate() -> None:
+    """提醒只出现一次，靠 onboarding_reminded 记住；默认必须 False。"""
+
+    config = AppConfig()
+    assert config.onboarding_reminded is False
+
+    config.onboarding_reminded = 1  # type: ignore[assignment]
+    config.validate()
+    assert config.onboarding_reminded is True
+
+
+def test_calibration_only_never_touches_the_sample_library() -> None:
+    """`--recalibrate` 只重标定，绝不能碰 samples.jsonl。
+
+    这条用源码契约锁住：重新标定的函数体里**不允许出现 run_collect**。
+    用户原话：「采集只采集一次啊，不要每次开启都采集一遍」——换个摄像头
+    只想重标定，不该把七种手势再录五分钟。
+    """
+
+    import inspect
+    import re
+
+    from handmouse import onboarding
+
+    source = inspect.getsource(onboarding.run_calibration_only)
+    # 只看"调用"，不看文档里提到的名字
+    assert re.search(r"\brun_collect\s*\(", source) is None
+    assert "_apply_margins" in source
+    assert "ConfigStore().save" in source

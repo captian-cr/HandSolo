@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os  # 只用于拼图标路径
 #
 # handmouse.spec —— PyInstaller 单文件（onefile）打包配置
 #
@@ -81,6 +82,11 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 # onefile：EXE 同时包含 a.binaries 与 a.datas，且没有 COLLECT 段。
+#: 应用图标：多尺寸 ico（Windows 资源管理器 / 任务栏 / 快捷方式都用它）。
+#: 文件缺失时给 None —— PyInstaller 会用默认图标，不报错。
+_ICON_PATH = os.path.join(SPECPATH, "assets", "hand-solo.ico")
+_ICON = _ICON_PATH if os.path.exists(_ICON_PATH) else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -88,6 +94,7 @@ exe = EXE(
     a.datas,
     [],
     name="handmouse",
+    icon=_ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

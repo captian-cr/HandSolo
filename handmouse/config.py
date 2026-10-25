@@ -440,6 +440,10 @@ class AppConfig:
     #: 按自己的手标定的阈值——那正是"换个人就不好用"的根源。
     #: 启动时不阻断（只提示），因为录一次要两分钟，强制会把人赶走。
     onboarding_done: bool = False
+    #: 首次设置提醒是否已经提示过一次。**只提示一次**，用户不做就不再打扰
+    #: （用户原话：「采集只采集一次啊，不要每次开启都采集一遍」）。
+    #: 想重新录：自己跑 `--onboarding`（重录手势）或 `--recalibrate`（只重标定）。
+    onboarding_reminded: bool = False
 
     # ---- 屏幕 / 多屏（ScreenMap）----
     multi_monitor: bool = False
@@ -488,6 +492,7 @@ class AppConfig:
             getattr(self, "camera_allow_fallback", True),
         )
         self.onboarding_done = bool(getattr(self, "onboarding_done", False))
+        self.onboarding_reminded = bool(getattr(self, "onboarding_reminded", False))
         # 未知取值一律退回 dshow：宁可走兼容性最好的那条路，也不要因为拼错
         # 一个字母就换到可能坏掉的后端上（表现是"摄像头打不开"）。
         backend = str(getattr(self, "camera_backend", "dshow") or "").strip().lower()

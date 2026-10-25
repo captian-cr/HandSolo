@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.png" alt="HandSolo" width="132">
+</p>
+
 # HandSolo · 单手
 
 **为一只手校准的鼠标。** 用摄像头控制 Windows 光标：MediaPipe 手部关键点 →
@@ -104,6 +108,10 @@ python -m handmouse --onboarding
 2. **量速率**：像平时那样动一动手，它记录**你自己的习惯速度**；
 3. **过手势**：七种手势，每种**先给你看题目、你捏合确认后**才开始录
    （准备 2 秒 + 练习 5 秒），边做边显示识别结果，同时录成你自己的样本库。
+
+**只需做一次。** 做完会写 `onboarding_done = true`，之后启动不再提；你没做的话也只会提醒一次（不会每次开都催你）。
+换了摄像头、或手在桌上的位置变了，只需要重新对一遍活动范围：
+`python -m handmouse --recalibrate`（**不碰你的手势样本**）。
 
 细节与常见问题见 [`docs/first-run.md`](docs/first-run.md)。
 
@@ -300,6 +308,8 @@ python -m handmouse --diagnostic-seconds 20  :: 跑 20 秒后打印指标并退�
 | `--sample-seconds S` | 采样心跳间隔，默认 10 |
 | `--guided` | 引导式基线：按固定节拍提示 6 步操作并自动出诊断 |
 | `--gate-diag` | 进入门定点排查（需 `HANDMOUSE_VERBOSE_GATE=1`） |
+| `--onboarding` | 首次设置向导：标定 3 个点 + 量速率 + 七种手势过一遍（**只需做一次**） |
+| `--recalibrate` | 只重做标定（3 个点 + 速率），**不动已有样本库** |
 | `--replay-intro` | 重放开屏动效 |
 | `--infer-width PX` / `--fast-inference` | 推理限宽（实测收益很小，仅供实验） |
 

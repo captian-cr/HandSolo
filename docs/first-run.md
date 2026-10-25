@@ -92,6 +92,19 @@ python -m handmouse --onboarding
 录完的样本用于"认得出是你的手"，模型在遇到不像你的姿势时会**拒绝识别**，
 而不是硬猜。
 
+## 这个只要做一次
+
+做完会写 `onboarding_done = true`，以后启动**不再提醒**。没做完也只会提醒一次，
+不会每次开都催你（想再看到提示：把 `config.json` 里 `onboarding_reminded` 改回 `false`）。
+
+**什么时候需要重做？**
+
+| 情况 | 用哪条命令 | 会不会动你的手势样本 |
+|---|---|---|
+| 换了摄像头 / 手在桌上的位置变了，只想重对活动范围 | `python -m handmouse --recalibrate` | **不会**，一个字节都不动 |
+| 手势识别不准了，想多录几个角度 | `python -m handmouse --onboarding`（会**追加**） | 追加，不覆盖 |
+| 想要全新的样本库 | 先删 `gesture_data\samples.jsonl` 再跑上一条 | 会 |
+
 ## 结束
 
 完成后会打印存了多少帧、写到哪个文件，并自动：

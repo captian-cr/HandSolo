@@ -102,6 +102,11 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
         "再把每种手势带你过一遍并录成你自己的样本库",
     )
     parser.add_argument(
+        "--recalibrate",
+        action="store_true",
+        help="只重做标定（3 个点 + 习惯速率），不录手势、不动已有样本库",
+    )
+    parser.add_argument(
         "--replay-intro",
         action="store_true",
         help="重放开屏动效（默认只在首次进入控制态时播一次）",
@@ -264,14 +269,23 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_onboarding(config)
 
-    # 还没录过自己的习惯：每次都提醒（按用户要求"下载好就要提醒"），
-    # 但不阻断——录一次要两分钟，强制会把人直接赶走。
-    if not config.onboarding_done:
+    # 只重标定：换了摄像头 / 手的位置变了，但不想把七种手势再录一遍
+    if getattr(args, "recalibrate", False):
+        from handmouse.onboarding import run_calibration_only
+
+        return run_calibration_only(config)
+
+    # 还没录过自己的习惯：**只提醒一次**（用户原话：「采集只采集一次啊，
+    # 不要每次开启都采集一遍」——每次启动都弹会让人以为要反复采集）。
+    # 用户不做就不再打扰；想再看到提示，把 config.json 里的
+    # onboarding_reminded 改回 false。
+    if not config.onboarding_done and not config.onboarding_reminded:
+        config.onboarding_reminded = True
         print()
         print("!" * 62)
         print("  还 没 录 过 你 自 己 的 手 势 习 惯")
         print("  现在用的阈值是作者按他自己的手标定的，换一个人会明显不跟手。")
-        print("  花两分钟录一遍你自己的：")
+        print("  花两分钟录一遍你自己的（**只需做一次**，之后不再提醒）：")
         print("      python -m handmouse --onboarding")
         print("  （或者：双击 「HandSolo（首次设置）.bat」）")
         print("!" * 62)

@@ -493,6 +493,19 @@ def _welcome() -> bool:
     return key not in _ABORT_KEYS
 
 
+def _apply_margins(config: AppConfig, points: list[ComfortPoint]):
+    """把标定点写进 config 的四边内缩。返回 ``(left, top, right, bottom)`` 或 None。"""
+
+    margins = margins_from_points([(item.x, item.y) for item in points])
+    if margins is not None:
+        left, top, right, bottom = margins
+        config.pointer_margin_left = round(left, 3)
+        config.pointer_margin_top = round(top, 3)
+        config.pointer_margin_right = round(right, 3)
+        config.pointer_margin_bottom = round(bottom, 3)
+    return margins
+
+
 def _save(
     config: AppConfig,
     dataset: GestureDataset,
@@ -517,14 +530,7 @@ def _save(
             config.gesture_model_reject_distance = round(float(threshold), 4)
         config.gesture_model_enabled = True
 
-    # 标定点 → 活动范围（这是唯一会改动映射的自动调整）
-    margins = margins_from_points([(item.x, item.y) for item in points])
-    if margins is not None:
-        left, top, right, bottom = margins
-        config.pointer_margin_left = round(left, 3)
-        config.pointer_margin_top = round(top, 3)
-        config.pointer_margin_right = round(right, 3)
-        config.pointer_margin_bottom = round(bottom, 3)
+    margins = _apply_margins(config, points)
 
     config.onboarding_done = True
     config.validate()
@@ -623,6 +629,84 @@ def run_onboarding(config: AppConfig) -> int:
     print(f"\n[设置] 已保存 {len(dataset)} 帧样本 + 配置 + 记录 → {out}")
     print("       以后想补录，跑 python -m handmouse.collect --append")
     _report(dataset, coverage, collected=[step.label for step in PRACTICE_STEPS])
+    return 0
+
+
+def run_calibration_only(config: AppConfig) -> int:
+    """只重做标定（3 点 + 速率），**不录手势、不动样本库**。
+
+    用途：换了摄像头 / 桌面上手的位置变了，只想把活动范围重新对一遍，
+    不想再花五分钟把七种手势录一遍。
+
+    与 `run_onboarding` 的区别只有一条：不调 `run_collect`，所以
+    `gesture_data/samples.jsonl` 一个字节都不会变；`onboarding.json` 里的
+    舒适点与速率会被更新（这是"重新标定"的全部意义）。
+    """
+
+    print("=" * 62)
+    print(f"{APP_NAME} 重新标定（不动样本库）")
+    print("=" * 62)
+    print("画面里会出现 3 个十字，依次是屏幕中央 / 左上 / 右下。")
+    print("十字只表示屏幕方位 —— 手放在你最舒服的位置，捏合一下即可。")
+    print()
+
+    points, profile, aborted = _calibrate(config)
+    if aborted:
+        print("[标定] 已中断，什么都没改。")
+        return 1
+    if not points:
+        print("[标定] 没读到捏合动作，活动范围保持原样。")
+        return 1
+
+    margins = _apply_margins(config, points)
+    config.onboarding_done = True
+    config.validate()
+    ConfigStore().save(config)
+
+    listed = "、".join(f"({item.x:.2f}, {item.y:.2f})" for item in points)
+    print(f"[标定] {len(points)} 个点：{listed}")
+    if margins is None:
+        print("       三点都贴近画面中央，活动范围保持默认。")
+    else:
+        print(
+            f"       活动区内缩 left={margins[0]:.3f} top={margins[1]:.3f} "
+            f"right={margins[2]:.3f} bottom={margins[3]:.3f}",
+        )
+    if profile is not None:
+        print(
+            f"[速率] 中位 {profile.p50:.3f}、p90 {profile.p90:.3f} 画面宽/秒"
+            f"（{profile.label}）→ 已记录",
+        )
+
+    # 只更新 onboarding.json 里的标定部分，样本库统计保持原样
+    path = default_dataset_path().with_name("onboarding.json")
+    record: dict = {}
+    if path.exists():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+    record.update(
+        {
+            "recalibrated_ns": time.time_ns(),
+            "comfort_points": [asdict(item) for item in points],
+            "speed": asdict(profile) if profile else record.get("speed"),
+            "margins": (
+                {
+                    "left": margins[0],
+                    "top": margins[1],
+                    "right": margins[2],
+                    "bottom": margins[3],
+                }
+                if margins
+                else record.get("margins")
+            ),
+        },
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[标定] 已写入 {path}")
+    print("       想连手势样本一起重录，用 python -m handmouse --onboarding")
     return 0
 
 
