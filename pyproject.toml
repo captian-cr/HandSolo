@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "handmouse"
-version = "0.11.0"
+version = "0.11.2"
 description = "HandSolo（单手）· 为一只手校准的手势鼠标：MediaPipe 手部关键点 → Windows SendInput（引擎层移植自 Vimoose，MIT）"
 requires-python = ">=3.10"
 

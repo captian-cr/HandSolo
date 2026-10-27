@@ -28,6 +28,7 @@ from types import SimpleNamespace
 
 from handmouse import (
     APP_NAME,
+    APP_NAME_CN,
     APP_TAGLINE,
     __version__,
     debug_view,
@@ -279,8 +280,22 @@ def main(argv: list[str] | None = None) -> int:
     # 不要每次开启都采集一遍」——每次启动都弹会让人以为要反复采集）。
     # 用户不做就不再打扰；想再看到提示，把 config.json 里的
     # onboarding_reminded 改回 false。
-    if not config.onboarding_done and not config.onboarding_reminded:
+    # 🔴 兜底：`onboarding_done=true` 但个人数据其实缺失（样本库空 / 没记录过
+    # 习惯速率）时，普通启动不会再提示，用户永远采不到自己的数据——这正是
+    # 用户实测「第一次开启时采集手势没有」的根因之一。加这一支让提示能重新出现。
+    needs_setup = (not config.onboarding_done and not config.onboarding_reminded) or (
+        not config.onboarding_reminded and _personal_data_missing()
+    )
+    if needs_setup:
         config.onboarding_reminded = True
+        # 窗口版（exe）没有控制台：print 到日志里等于没说。用系统对话框问一句，
+        # 选"是"就直接进向导 —— 否则用户永远不知道要做这一步。
+        # 🔴 这是 exe 与源码版最大的体验差距：exe 是 `console=False`，
+        #    用户双击之后看不见任何提示，只能靠日志文件才发现"原来还要设置"。
+        if getattr(sys, "frozen", False) and _ask_run_onboarding():
+            from handmouse.onboarding import run_onboarding
+
+            return run_onboarding(config)
         print()
         print("!" * 62)
         print("  还 没 录 过 你 自 己 的 手 势 习 惯")
@@ -678,6 +693,63 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[取证] 共保存 {recorder.saved} 帧到 {recorder.directory}")
     print(f"退出。DPI={dpi_state()}")
     return exit_code
+
+
+def _ask_run_onboarding() -> bool:
+    """窗口版首次启动：问一句要不要现在设置。只有冻结版会调它。
+
+    🔴 为什么必须是系统对话框而不是 ``print``：exe 是 ``console=False``，
+    打印出来的字进了日志文件，用户双击之后屏幕上**什么都没有**。
+    于是"要不要设置"这件事从来没被传达过，用户只会觉得"这版本手势不准"。
+    """
+
+    try:
+        import ctypes
+
+        MB_YESNO = 0x04
+        MB_ICONQUESTION = 0x20
+        IDYES = 6
+        text = (
+            f"欢迎使用 {APP_NAME}。\n\n"
+            "还 没 录 过 你 自 己 的 手 势 习 惯。\n"
+            "现在用的阈值是按作者的手标定的，换一个人会明显不跟手。\n\n"
+            "花两分钟设置一下吗？（只做一次）\n"
+            "  · 在画面上标 3 个点，圈出你手最舒服的活动范围\n"
+            "  · 量出你自己习惯的移动速度\n"
+            "  · 七种手势各带你做一遍，录成你自己的样本库\n\n"
+            "选「否」也可以继续用，但动作会不太准，之后随时能补：\n"
+            f"  {Path(sys.executable).name if getattr(sys, 'frozen', False) else 'python -m handmouse'}"
+            " --onboarding"
+        )
+        answer = ctypes.windll.user32.MessageBoxW(
+            None, text, f"{APP_NAME_CN} 首次设置", MB_YESNO | MB_ICONQUESTION,
+        )
+        return answer == IDYES
+    except Exception:
+        return False
+
+
+def _personal_data_missing() -> bool:
+    """个人样本库为空、或从未记录过习惯速率 → 视为没真正设置过。
+
+    兜底 ``onboarding_done=true`` 但数据其实缺失的尴尬：这种情况下普通启动
+    不会再提示，用户永远采不到自己的数据（实测「第一次开启时采集手势没有」）。
+    """
+
+    try:
+        from handmouse.gesture_data import default_dataset_path
+
+        dataset = default_dataset_path()
+        if not dataset.exists() or dataset.stat().st_size < 50:
+            return True
+        record_path = dataset.with_name("onboarding.json")
+        if not record_path.exists():
+            return True
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        return not bool(record.get("speed"))
+    except Exception:
+        # 判不出来就当"有数据"：宁可少弹一次，也不要把已设置好的人反复打扰。
+        return False
 
 
 def _onboarding_hint() -> list[str]:

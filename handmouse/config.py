@@ -15,15 +15,39 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 
+#: 冻结版（exe）的"个人数据目录"名。见 :func:`_base_dir`。
+#:
+#: 🔴 为什么需要它：exe 与源码版是两套目录，默认各读各的 ``config.json``。
+#: 于是同一个人的手，在 exe 里是出厂默认阈值、在源码版里是调好的阈值——
+#: 用户的原话是「exe 版本跟源码跑出来的效果不一样」。把个人数据（配置 +
+#: 手势库 + 日志）收进 exe 同目录的 ``personal/``，两边就能共用同一份真源；
+#: 发布给陌生人的包**不带**这个目录，仍然是干净起步。
+PERSONAL_DIR_NAME = "personal"
+
+
 def _base_dir() -> Path:
-    """配置文件所在目录。
+    """配置 / 个人数据所在目录。
 
     打包成单 exe 后 ``__file__`` 指向解压出来的一次性临时目录，写进去的配置
     下次启动就没了，所以冻结模式下改用 exe 自身所在目录。
+
+    冻结模式再分两种情况：
+
+    * exe 同目录下有 ``personal/`` → 所有个人数据（``config.json``、
+      ``gesture_data/``、``logs/``）都落在里面。这是"我自己用的 exe"形态，
+      与源码版共用同一份数据，手感一致。
+    * 没有 ``personal/`` → 就用 exe 同目录（发布包的干净起步形态：
+      首次运行写默认配置，向导引导用户建立属于自己的阈值）。
+
+    源码模式（``frozen=False``）完全不受影响，仍是项目根目录。
     """
 
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        personal = exe_dir / PERSONAL_DIR_NAME
+        if personal.is_dir():
+            return personal
+        return exe_dir
     return Path(__file__).resolve().parent.parent
 
 

@@ -30,20 +30,42 @@ pyinstaller handmouse.spec --noconfirm --clean
 图标已嵌入；带预览窗跑 6 秒共 **11.8 秒**（含 onefile 解压 2~4 秒），
 摄像头 640×480@30fps、MediaPipe 模型加载正常、退出码 0。
 
-打包后**必须**做的三项冒烟（前两项我这边能做，第三项只能靠干净机器）：
+打包后**必须**做的四项冒烟（前三项我这边能做，第四项只能靠干净机器）：
 
 - [ ] `HandSolo.exe --safe-mode --no-preview --diagnostic-seconds 6` → 退出码 0；
-- [ ] **以 DETACHED_PROCESS 启动**（等价于双击，没有标准句柄）→ 确认 exe 同目录出现
-      `logs\handmouse-<日期>.log` 且内容是干净 UTF-8；
+- [ ] **以 DETACHED_PROCESS / ShellExecute 启动**（等价于双击，没有标准句柄）→ 确认日志落到
+      `logs\handmouse-<日期>.log`（有 `personal\` 时是 `personal\logs\`）且内容是干净 UTF-8；
+- [ ] **配置路径要对**：日志里 `配置=` 指向你预期的那个 `config.json`。
+      有 `personal\` 时必须是 `dist\personal\config.json`——指到 `dist\config.json`
+      就说明 `personal/` 没生效，手感会退回出厂默认（这条最容易漏，2026-10-27 就是栽在这）；
 - [ ] 在**没装 Python 的机器**上双击：启动 → 摄像头 → 预览窗 → 光标注入四条。
 
-🔴 已经踩过、别再踩的三个坑（都是"源码跑得好、打包就崩"的类型）：
+🔴 已经踩过、别再踩的五个坑（都是"源码跑得好、打包就崩"的类型）：
 
 | 症状 | 真因 |
 |---|---|
 | `ModuleNotFoundError: No module named 'tkinter'` | `excludes` 里有 `tkinter`，但 `snap_ui.py` 顶层就 import 它（那个排除项是打包配置写早了） |
 | 双击没反应、也找不到日志 | `__main__._ensure_output()` 自己拼 `__file__.parent.parent`，单文件 exe 里那是**一次性解压目录**，日志写进去退出即删 → 必须用 `config.PROJECT_ROOT` |
 | 首次提醒让人 `python -m handmouse --onboarding` | exe 用户没有 Python → `_onboarding_hint()` 按 `sys.frozen` 给不同命令 |
+| 双击后**什么都不弹**，用户不知道要设置 | `console=False` 下 `print` 进了日志，屏幕上一片安静 → 冻结版必须用 `_ask_run_onboarding()` 弹系统对话框 |
+| exe 里**控件磁吸静默消失** | 依赖 uiautomation / comtypes 只在 `cursor_snap.py` 的函数体里 import。静态扫描通常能抓到，但构建环境一缺包就**静默降级**，不报错。→ `hiddenimports` 里显式列死 |
+
+## 1.6 `dist/` 的两种形态（打包完必看）
+
+`dist/` 同时承担两个角色，靠**有没有 `personal/` 子目录**区分：
+
+| 形态 | 长什么样 | 谁用 |
+|---|---|---|
+| **发布基线** | `dist/HandSolo.exe` + `dist/config.json`（出厂默认值） | 压成 zip 挂 Release。**绝不能带个人数据** |
+| **个人版** | 上面这些 + `dist/personal/`（`config.json`、`gesture_data/`、`logs/`） | 作者本机日常用，手感与源码版一致 |
+
+- 发布前检查 `dist/config.json` **逐字段等于** `AppConfig()` 的默认值。
+  最省事的做法是直接 `ConfigStore(Path("dist/config.json")).reset()`——
+  只要跑过一次 exe，这个文件就会被写进 `onboarding_reminded: true`
+  之类的运行痕迹，**后果是陌生人永远看不到"该设置一下"的提示**（已踩过一次）。
+- 打包**不会**清掉 `dist/personal/`，但换机器 / 重新 clone 后要重跑
+  `同步个人设置到exe版.bat`（内部调 `scripts/sync_personal.py`）。
+- 🔴 打 zip 时**排除** `personal/`：那个目录装的是作者的手标定参数和 1203 帧个人样本。
 
 ## 2. 版本号（三处，缺一不可）
 

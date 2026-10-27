@@ -48,14 +48,15 @@ datas = [
 # uiautomation 相关：
 #   cursor_snap.py 在运行时懒加载 `from uiautomation import uiautomation`，
 #   且被 try/except ImportError 包住，缺包时自动降级为纯坐标点击。
-#   PyInstaller 静态分析抓不到这种运行期 import，因此默认不自动打包它。
-#   这里**故意不加** hiddenimports("uiautomation")：
-#     - 不加：构建 venv 有没有它都不影响 exe；目标机若没随 exe 带上，
-#       运行期 import 失败会被 except 捕获 → 优雅降级，不会崩。
-#     - 若确实要做 uia-enabled 单文件，再额外加
-#       hiddenimports=["uiautomation", "comtypes"]（comtypes 是它的依赖，
-#       且其 COM 类型库缓存机制在冻结环境下偶有问题，需实机验证）。
-hiddenimports = []
+# 🔴 **仍然显式打包 uiautomation + comtypes**（2026-10-26 定）：
+#   PyInstaller 的静态扫描其实**能**看到函数体内的 import 语句，所以只要构建
+#   环境装了它，exe 就会带上（实测 PYZ 里 comtypes/uiautomation 齐全、磁吸可用）。
+#   但那属于"碰巧抓到"：一旦构建环境少了这个包、或将来把 import 改成
+#   importlib 动态加载，磁吸就会**静默消失** —— 打包不报错、启动不报错，
+#   用户只会觉得"这版本残废"。缺依赖要崩在构建期，不能崩在用户手里。
+#   实测 comtypes 在冻结版下能把 COM 类型库缓存写到
+#   %TEMP%\comtypes_cache\HandSolo-<pid>，无需额外配置。
+hiddenimports = ["uiautomation", "comtypes"]
 
 excludes = [
     "PySide6",

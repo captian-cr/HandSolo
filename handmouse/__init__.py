@@ -22,6 +22,6 @@ APP_NAME_CN = "单手"
 #: 一句话定位，README 和 ``--help`` 共用。
 APP_TAGLINE = "为一只手校准的鼠标"
 
-__version__ = "0.11.0"
+__version__ = "0.11.2"
 
 __all__ = ["APP_NAME", "APP_NAME_CN", "APP_TAGLINE", "__version__"]

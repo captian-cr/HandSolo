@@ -1,5 +1,78 @@
 # 变更记录
 
+## 0.11.2 — 2026-10-27
+
+**主题：exe 版和源码版终于跑同一套参数。**
+
+用户原话：「死命令我桌面上的 HandSolo.bat 代码不能动，但是按这个效果，
+把 exe 版本的优化，把很多的毛病都改掉」。这里的"这个效果"指桌面 `HandSolo.bat`
+（源码版）跑出来的手感。
+
+**先查根因，再动手改。查出来的结论是：exe 本身没坏，它读的是另一份配置。**
+
+两条启动路径的 `PROJECT_ROOT` 不同，于是同一个人的手在两边是两套阈值：
+
+| 项 | 源码版（`pythonw -m handmouse`） | exe 版（0.11.0） |
+|---|---|---|
+| 配置文件 | `手势追踪\config.json`（手标定过） | `dist\config.json`（出厂默认） |
+| `pointer_margin_*` | 0.465 / 0.175 / 0.199 / 0.315 不对称 | 0.15 / 0.22 对称默认 |
+| `pointer_response` | 0.88 | 默认 |
+| `gesture_model_enabled` | `true` | `false` |
+| `drag_hold_ms` / `fist_hold_ms` | 1000 / 900 | 5000 / 500 |
+| `onboarding_done` | `true` | `false` |
+| 个人手势库 | `gesture_data\samples.jsonl` 1203 帧 | **不存在** |
+
+`dist\logs\handmouse-20261026.log` 里那两条
+`个人手势库样本不足，回退几何判据：{'move': 0, 'stop': 0, ...}` 就是证据。
+
+### 一、`personal/`：让 exe 与源码版共用同一份个人数据
+
+冻结版的 `PROJECT_ROOT` 现在多一层判定（`config.PERSONAL_DIR_NAME`）：
+
+- exe 同目录**有** `personal/` → 配置、手势库、日志全部落在里面（"我自己用的 exe"形态）；
+- **没有** → 仍用 exe 同目录（发布包形态：干净起步，向导引导陌生人建自己的阈值）。
+
+源码模式（`frozen=False`）**完全没有改动**，仍是项目根目录——他是天天在跑这条路径的，
+不拿主路径给 exe 让路。测试 `test_personal_dir.py` 把这个边界钉死了。
+
+配套 `scripts/sync_personal.py` + 双击入口 `同步个人设置到exe版.bat`：
+把源码版这份真源同步进 `dist\personal\`，**不碰** `dist\config.json`（发布基线），
+**不碰**任何 `.bat`。
+
+### 二、exe 终于会"开口说话"了
+
+`console=False` 意味着所有 `print` 都进了日志文件，用户在屏幕上**什么都看不见**。
+0.11.0 的后果是：exe 用户永远不知道要做首次设置，只能手动敲 `HandSolo.exe --onboarding`
+（对非程序员等于不存在）。
+
+- 新增 `_ask_run_onboarding()`：冻结版首次启动用系统对话框问"要不要现在设置"，
+  选"是"直接进向导；
+- 新增 `_personal_data_missing()`：`onboarding_done=true` 但样本库为空 / 没记录过
+  习惯速率的，也能重新触发（兜住"数据被删了但配置还写着已设置"的错位）。
+
+### 三、发布基线被运行污染，已恢复
+
+`dist\config.json` 里 `onboarding_reminded` 被写成 `true`——那是 10-26 13:39 那次
+exe 试跑时保存的运行痕迹。后果很隐蔽：**陌生人下载后永远不会看到"该设置一下"的提示**。
+已用 `ConfigStore.reset()` 恢复成出厂默认，全字段比对无差异。
+
+### 四、磁吸依赖改成显式打包
+
+`hiddenimports = ["uiautomation", "comtypes"]`。
+
+先核实了一件事：**当前 exe 的磁吸是好的**——读 `PYZ.pyz` 的模块表确认
+`comtypes.*` 与 `uiautomation.*` 齐全，10-26 的日志里也能看到 comtypes 生成类型库缓存。
+但那属于"静态扫描碰巧抓到函数体里的 import"，不可依赖：构建环境少装一个包、
+或将来改成 `importlib` 动态加载，磁吸就会**静默消失**——打包不报错、启动不报错，
+用户只觉得"这版本残废"。宁可在构建期缺依赖时报错。
+
+### 五、测试
+
+`558 → 566 passed`（+8：personal/ 三条分支、目录名可读性、同步的四个边界）。
+真机复测见下方"未验证"。
+
+⚠️ **仍未验证**：没装 Python 的干净机器上双击、以及 exe 跑完整向导的实机录像。
+
 ## 0.11.0 — 2026-10-25
 
 **主题：新用户必须先录自己的手。** 用户原话：
